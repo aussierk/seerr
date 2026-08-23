@@ -165,7 +165,7 @@ export class MediaRequest {
         tmdbId: requestBody.mediaId,
         mediaType: requestBody.mediaType,
       },
-      relations: ['requests'],
+      relations: ['requests', 'requests.requestedBy'],
     });
 
     if (!media) {
@@ -215,28 +215,35 @@ export class MediaRequest {
       })
       .getMany();
 
+    const statusKey = requestBody.is4k ? 'status4k' : 'status';
+    const mediaAlreadyAvailable = media[statusKey] === MediaStatus.AVAILABLE;
+
     if (existing && existing.length > 0) {
-      // If there is an existing movie request that isn't declined, don't allow a new one.
-      if (
-        requestBody.mediaType === MediaType.MOVIE &&
-        existing[0].status !== MediaRequestStatus.DECLINED &&
-        existing[0].status !== MediaRequestStatus.COMPLETED
-      ) {
+      // Block a same-user duplicate at any status, or a different user's
+      // request unless the media is already available.
+      const blockingRequest = existing.find(
+        (r) =>
+          requestBody.mediaType === MediaType.MOVIE &&
+          r.status !== MediaRequestStatus.DECLINED &&
+          r.status !== MediaRequestStatus.COMPLETED &&
+          (r.requestedBy.id === requestUser.id || !mediaAlreadyAvailable)
+      );
+      if (blockingRequest) {
         logger.warn('Duplicate request for media blocked', {
           tmdbId: tmdbMedia.id,
           mediaType: requestBody.mediaType,
           is4k: requestBody.is4k,
           label: 'Media Request',
         });
-
         throw new DuplicateMediaRequestError(
-          'Request for this media already exists.'
+          blockingRequest.requestedBy.id === requestUser.id
+            ? 'You already have a request for this media.'
+            : 'Request for this media already exists.'
         );
       }
 
       // If an existing auto-request for this media exists from the same user,
       // don't allow a new one.
-      const statusKey = requestBody.is4k ? 'status4k' : 'status';
       if (
         existing.find(
           (r) =>
@@ -473,7 +480,15 @@ export class MediaRequest {
       // We need to check existing requests on this title to make sure we don't double up on seasons that were
       // already requested. In the case they were, we just throw out any duplicates but still approve the request.
       // (Unless there are no seasons, in which case we abort)
+      // A season only blocks a different user once it is already available; a
+      // same-user active request always blocks, same as the movie duplicate check.
       if (media.requests) {
+        const availableSeasonNumbers = new Set(
+          media.seasons
+            .filter((s) => s[statusKey] === MediaStatus.AVAILABLE)
+            .map((s) => s.seasonNumber)
+        );
+
         existingSeasons = media.requests
           .filter(
             (request) =>
@@ -482,30 +497,16 @@ export class MediaRequest {
               request.status !== MediaRequestStatus.COMPLETED
           )
           .reduce((seasons, request) => {
-            const combinedSeasons = request.seasons.map(
-              (season) => season.seasonNumber
-            );
-
-            return [...seasons, ...combinedSeasons];
+            const blockedSeasons = request.seasons
+              .map((s) => s.seasonNumber)
+              .filter(
+                (sn) =>
+                  request.requestedBy.id === requestUser.id ||
+                  !availableSeasonNumbers.has(sn)
+              );
+            return [...seasons, ...blockedSeasons];
           }, [] as number[]);
       }
-
-      // We should also check seasons that are available/partially available but don't have existing requests
-      if (media.seasons) {
-        existingSeasons = [
-          ...existingSeasons,
-          ...media.seasons
-            .filter(
-              (season) =>
-                season[requestBody.is4k ? 'status4k' : 'status'] !==
-                  MediaStatus.UNKNOWN &&
-                season[requestBody.is4k ? 'status4k' : 'status'] !==
-                  MediaStatus.DELETED
-            )
-            .map((season) => season.seasonNumber),
-        ];
-      }
-
       const finalSeasons = requestedSeasons.filter(
         (rs) => !existingSeasons.includes(rs)
       );

@@ -345,20 +345,8 @@ export class MediaRequestSubscriber implements EntitySubscriberInterface<MediaRe
           }
         }
 
-        if (
-          media[entity.is4k ? 'status4k' : 'status'] === MediaStatus.AVAILABLE
-        ) {
-          logger.warn('Media already exists, marking request as COMPLETED', {
-            label: 'Media Request',
-            requestId: entity.id,
-            mediaId: entity.media.id,
-          });
-
-          const requestRepository = getRepository(MediaRequest);
-          entity.status = MediaRequestStatus.COMPLETED;
-          await requestRepository.save(entity);
-          return;
-        }
+        const alreadyAvailable =
+          media[entity.is4k ? 'status4k' : 'status'] === MediaStatus.AVAILABLE;
 
         const radarrMovieOptions: RadarrMovieOptions = {
           profileId: qualityProfile,
@@ -394,6 +382,20 @@ export class MediaRequestSubscriber implements EntitySubscriberInterface<MediaRe
             media[entity.is4k ? 'serviceId4k' : 'serviceId'] =
               radarrSettings?.id;
             await mediaRepository.save(media);
+
+            if (alreadyAvailable) {
+              logger.info(
+                'Media already available, applied requester tag and marking request as COMPLETED',
+                {
+                  label: 'Media Request',
+                  requestId: entity.id,
+                  mediaId: entity.media.id,
+                }
+              );
+              const requestRepository = getRepository(MediaRequest);
+              entity.status = MediaRequestStatus.COMPLETED;
+              await requestRepository.save(entity);
+            }
           })
           .catch(async () => {
             try {
@@ -540,23 +542,8 @@ export class MediaRequestSubscriber implements EntitySubscriberInterface<MediaRe
           throw new Error('Media data not found');
         }
 
-        if (
-          media[entity.is4k ? 'status4k' : 'status'] === MediaStatus.AVAILABLE
-        ) {
-          logger.warn('Media already exists, marking request as COMPLETED', {
-            label: 'Media Request',
-            requestId: entity.id,
-            mediaId: entity.media.id,
-          });
-
-          const requestRepository = getRepository(MediaRequest);
-          entity.status = MediaRequestStatus.COMPLETED;
-          entity.seasons.forEach((season) => {
-            season.status = MediaRequestStatus.COMPLETED;
-          });
-          await requestRepository.save(entity);
-          return;
-        }
+        const alreadyAvailable =
+          media[entity.is4k ? 'status4k' : 'status'] === MediaStatus.AVAILABLE;
 
         const tmdb = new TheMovieDb();
         const sonarr = new SonarrAPI({
@@ -567,9 +554,11 @@ export class MediaRequestSubscriber implements EntitySubscriberInterface<MediaRe
         const tvdbId = series.external_ids.tvdb_id ?? media.tvdbId;
 
         if (!tvdbId) {
-          const requestRepository = getRepository(MediaRequest);
-          await mediaRepository.remove(media);
-          await requestRepository.remove(entity);
+          if (!alreadyAvailable) {
+            const requestRepository = getRepository(MediaRequest);
+            await mediaRepository.remove(media);
+            await requestRepository.remove(entity);
+          }
           throw new Error('TVDB ID not found');
         }
 
@@ -736,7 +725,23 @@ export class MediaRequestSubscriber implements EntitySubscriberInterface<MediaRe
             ] = sonarrSeries.titleSlug;
             media[entity.is4k ? 'serviceId4k' : 'serviceId'] =
               sonarrSettings?.id;
-            await mediaRepository.save(media);
+
+            if (alreadyAvailable) {
+              logger.info(
+                'Media already available; applied requester tag and marking request as COMPLETED',
+                {
+                  label: 'Media Request',
+                  requestId: entity.id,
+                  mediaId: entity.media.id,
+                }
+              );
+              const requestRepository = getRepository(MediaRequest);
+              entity.status = MediaRequestStatus.COMPLETED;
+              entity.seasons.forEach((season) => {
+                season.status = MediaRequestStatus.COMPLETED;
+              });
+              await requestRepository.save(entity);
+            }
           })
           .catch(async () => {
             try {
