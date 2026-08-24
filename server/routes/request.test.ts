@@ -695,6 +695,34 @@ describe('POST /request (movie), override rules', () => {
     assert.strictEqual(res.status, 201);
     assert.strictEqual(res.body.rootFolder, '/overridden/movies');
   });
+
+  it('does not apply an unrelated override rule when there is no default Radarr server configured', async () => {
+    getSettings().radarr = [];
+    getSettings().sonarr = [];
+
+    const userRepo = getRepository(User);
+    const friend = await userRepo.findOneOrFail({
+      where: { email: 'friend@seerr.dev' },
+    });
+
+    const overrideRuleRepo = getRepository(OverrideRule);
+    await overrideRuleRepo.save(
+      new OverrideRule({
+        radarrServiceId: 999,
+        users: String(friend.id),
+        rootFolder: '/overridden/movies',
+      })
+    );
+
+    const agent = await loginAs('friend@seerr.dev', 'test1234');
+    const res = await agent.post('/request').send({
+      mediaType: MediaType.MOVIE,
+      mediaId: 88005,
+    });
+
+    assert.strictEqual(res.status, 201);
+    assert.strictEqual(res.body.rootFolder, null);
+  });
 });
 
 describe('POST /request (tv), override rules', () => {
@@ -754,5 +782,34 @@ describe('POST /request (tv), override rules', () => {
 
     assert.strictEqual(res.status, 201);
     assert.strictEqual(res.body.rootFolder, '/overridden/tv');
+  });
+
+  it('does not apply an unrelated override rule when there is no default Sonarr server configured', async () => {
+    getSettings().radarr = [];
+    getSettings().sonarr = [];
+
+    const userRepo = getRepository(User);
+    const friend = await userRepo.findOneOrFail({
+      where: { email: 'friend@seerr.dev' },
+    });
+
+    const overrideRuleRepo = getRepository(OverrideRule);
+    await overrideRuleRepo.save(
+      new OverrideRule({
+        sonarrServiceId: 999,
+        users: String(friend.id),
+        rootFolder: '/overridden/tv',
+      })
+    );
+
+    const agent = await loginAs('friend@seerr.dev', 'test1234');
+    const res = await agent.post('/request').send({
+      mediaType: MediaType.TV,
+      mediaId: 88006,
+      seasons: [1],
+    });
+
+    assert.strictEqual(res.status, 201);
+    assert.strictEqual(res.body.rootFolder, null);
   });
 });

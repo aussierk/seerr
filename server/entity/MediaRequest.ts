@@ -252,20 +252,17 @@ export class MediaRequest {
         ? settings.sonarr.find((s) => s.is4k && s.isDefault)?.id
         : settings.sonarr.find((s) => !s.is4k && s.isDefault)?.id;
 
-      const defaultServiceId =
+      const [defaultServiceIdField, defaultServiceId] =
         requestBody.mediaType === MediaType.MOVIE
-          ? defaultRadarrId
-          : defaultSonarrId;
+          ? (['radarrServiceId', defaultRadarrId] as const)
+          : (['sonarrServiceId', defaultSonarrId] as const);
 
       const overrideRuleRepository = getRepository(OverrideRule);
       const overrideRules =
         defaultServiceId === undefined
           ? []
           : await overrideRuleRepository.find({
-              where:
-                requestBody.mediaType === MediaType.MOVIE
-                  ? { radarrServiceId: defaultServiceId }
-                  : { sonarrServiceId: defaultServiceId },
+              where: { [defaultServiceIdField]: defaultServiceId },
             });
 
       const appliedOverrideRules = overrideRules.filter((rule) => {
