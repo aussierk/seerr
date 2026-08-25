@@ -736,6 +736,7 @@ export class MediaRequestSubscriber implements EntitySubscriberInterface<MediaRe
             ] = sonarrSeries.titleSlug;
             media[entity.is4k ? 'serviceId4k' : 'serviceId'] =
               sonarrSettings?.id;
+            await mediaRepository.save(media);
 
             if (mediaAlreadyAvailable) {
               logger.info(

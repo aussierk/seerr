@@ -362,6 +362,13 @@ describe('MediaRequestSubscriber.sendToRadarr', () => {
       where: { id: request.id },
     });
     assert.strictEqual(finalRequest.status, MediaRequestStatus.COMPLETED);
+
+    const persistedMedia = await getRepository(Media).findOneOrFail({
+      where: { id: media.id },
+    });
+    assert.strictEqual(persistedMedia.externalServiceId, 7);
+    assert.strictEqual(persistedMedia.externalServiceSlug, 'test-movie');
+    assert.strictEqual(persistedMedia.serviceId, 0);
   });
 
   it('marks the request FAILED, not COMPLETED, when addMovie rejects for already-available media', async () => {
@@ -455,6 +462,13 @@ describe('MediaRequestSubscriber.sendToSonarr', () => {
         (s) => s.status === MediaRequestStatus.COMPLETED
       )
     );
+
+    const persistedMedia = await getRepository(Media).findOneOrFail({
+      where: { id: media.id },
+    });
+    assert.strictEqual(persistedMedia.externalServiceId, 7);
+    assert.strictEqual(persistedMedia.externalServiceSlug, 'test-show');
+    assert.strictEqual(persistedMedia.serviceId, 0);
   });
 
   it('marks the request FAILED, not COMPLETED, when addSeries rejects for an already-available season', async () => {
