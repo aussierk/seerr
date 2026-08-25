@@ -297,21 +297,6 @@ export class MediaRequestSubscriber implements EntitySubscriberInterface<MediaRe
           return;
         }
 
-        if (
-          media[entity.is4k ? 'status4k' : 'status'] === MediaStatus.AVAILABLE
-        ) {
-          logger.warn('Media already exists, marking request as COMPLETED', {
-            label: 'Media Request',
-            requestId: entity.id,
-            mediaId: entity.media.id,
-          });
-
-          const requestRepository = manager.getRepository(MediaRequest);
-          entity.status = MediaRequestStatus.COMPLETED;
-          await requestRepository.save(entity);
-          return;
-        }
-
         const tmdb = new TheMovieDb();
         const radarr = new RadarrAPI({
           apiKey: radarrSettings.apiKey,
