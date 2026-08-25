@@ -56,6 +56,10 @@ import {
   MediaType,
 } from '@server/constants/media';
 import { MediaServerType } from '@server/constants/server';
+import {
+  isRequestStillBlocking,
+  isSeasonNumberRequestable,
+} from '@server/lib/requestRules';
 import type { TvDetails as TvDetailsType } from '@server/models/Tv';
 import type { Crew } from '@server/models/common';
 import axios from 'axios';
@@ -281,32 +285,31 @@ const TvDetails = ({ tv }: TvDetailsProps) => {
   }
 
   const getAllRequestedSeasons = (is4k: boolean): number[] => {
-    const requestedSeasons = (data?.mediaInfo?.requests ?? [])
-      .filter(
-        (request) =>
-          request.is4k === is4k &&
-          request.status !== MediaRequestStatus.DECLINED &&
-          request.status !== MediaRequestStatus.COMPLETED
-      )
+    const availableSeasonNumbers = new Set(
+      (data?.mediaInfo?.seasons ?? [])
+        .filter(
+          (season) =>
+            season[is4k ? 'status4k' : 'status'] === MediaStatus.AVAILABLE
+        )
+        .map((season) => season.seasonNumber)
+    );
+
+    return (data?.mediaInfo?.requests ?? [])
+      .filter((request) => request.is4k === is4k)
       .reduce((requestedSeasons, request) => {
         return [
           ...requestedSeasons,
-          ...request.seasons.map((sr) => sr.seasonNumber),
+          ...request.seasons
+            .map((sr) => sr.seasonNumber)
+            .filter((seasonNumber) =>
+              isRequestStillBlocking({
+                requestStatus: request.status,
+                isOwnRequest: request.requestedBy.id === user?.id,
+                targetAvailable: availableSeasonNumbers.has(seasonNumber),
+              })
+            ),
         ];
       }, [] as number[]);
-
-    const availableSeasons = (data?.mediaInfo?.seasons ?? [])
-      .filter(
-        (season) =>
-          (season[is4k ? 'status4k' : 'status'] === MediaStatus.AVAILABLE ||
-            season[is4k ? 'status4k' : 'status'] ===
-              MediaStatus.PARTIALLY_AVAILABLE ||
-            season[is4k ? 'status4k' : 'status'] === MediaStatus.PROCESSING) &&
-          !requestedSeasons.includes(season.seasonNumber)
-      )
-      .map((season) => season.seasonNumber);
-
-    return [...requestedSeasons, ...availableSeasons];
   };
 
   // Mirrors the season list the request modal offers, so the two agree.
@@ -314,8 +317,10 @@ const TvDetails = ({ tv }: TvDetailsProps) => {
     .filter(
       (season) =>
         season.episodeCount !== 0 &&
-        (settings.currentSettings.enableSpecialEpisodes ||
-          season.seasonNumber !== 0)
+        isSeasonNumberRequestable(
+          season.seasonNumber,
+          settings.currentSettings.enableSpecialEpisodes
+        )
     )
     .map((season) => season.seasonNumber);
 
@@ -800,10 +805,11 @@ const TvDetails = ({ tv }: TvDetailsProps) => {
             {data.seasons
               .slice()
               .reverse()
-              .filter(
-                (season) =>
-                  settings.currentSettings.enableSpecialEpisodes ||
-                  season.seasonNumber !== 0
+              .filter((season) =>
+                isSeasonNumberRequestable(
+                  season.seasonNumber,
+                  settings.currentSettings.enableSpecialEpisodes
+                )
               )
               .map((season) => {
                 const show4k =
