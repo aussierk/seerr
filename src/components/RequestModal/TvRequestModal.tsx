@@ -18,7 +18,7 @@ import type { NonFunctionProperties } from '@server/interfaces/api/common';
 import type { QuotaResponse } from '@server/interfaces/api/userInterfaces';
 import { Permission } from '@server/lib/permissions';
 import {
-  isRequestStillBlocking,
+  getBlockedSeasonNumbers,
   isSeasonNumberRequestable,
 } from '@server/lib/requestRules';
 import type { TvDetails } from '@server/models/Tv';
@@ -252,37 +252,14 @@ const TvRequestModal = ({
       .map((season) => season.seasonNumber);
   };
 
-  const getAllRequestedSeasons = (): number[] => {
-    // Seasons already fully available don't block a different user from
-    // requesting them (mirrors the backend's duplicate-block rule); only
-    // the requesting user's own active request does.
-    const availableSeasonNumbers = new Set(
-      (data?.mediaInfo?.seasons ?? [])
-        .filter(
-          (season) =>
-            season[is4k ? 'status4k' : 'status'] === MediaStatus.AVAILABLE
-        )
-        .map((season) => season.seasonNumber)
-    );
-
-    return (data?.mediaInfo?.requests ?? [])
-      .filter((request) => request.is4k === is4k)
-      .reduce((requestedSeasons, request) => {
-        return [
-          ...requestedSeasons,
-          ...request.seasons
-            .filter((season) => !editingSeasons.includes(season.seasonNumber))
-            .map((sr) => sr.seasonNumber)
-            .filter((seasonNumber) =>
-              isRequestStillBlocking({
-                requestStatus: request.status,
-                isOwnRequest: request.requestedBy.id === user?.id,
-                targetAvailable: availableSeasonNumbers.has(seasonNumber),
-              })
-            ),
-        ];
-      }, [] as number[]);
-  };
+  const getAllRequestedSeasons = (): number[] =>
+    getBlockedSeasonNumbers({
+      seasons: data?.mediaInfo?.seasons ?? [],
+      requests: data?.mediaInfo?.requests ?? [],
+      userId: user?.id,
+      is4k,
+      ignoreSeasonNumbers: editingSeasons,
+    });
 
   const isSelectedSeason = (seasonNumber: number): boolean =>
     selectedSeasons.includes(seasonNumber);

@@ -57,7 +57,7 @@ import {
 } from '@server/constants/media';
 import { MediaServerType } from '@server/constants/server';
 import {
-  isRequestStillBlocking,
+  getBlockedSeasonNumbers,
   isSeasonNumberRequestable,
 } from '@server/lib/requestRules';
 import type { TvDetails as TvDetailsType } from '@server/models/Tv';
@@ -284,33 +284,13 @@ const TvDetails = ({ tv }: TvDetailsProps) => {
     );
   }
 
-  const getAllRequestedSeasons = (is4k: boolean): number[] => {
-    const availableSeasonNumbers = new Set(
-      (data?.mediaInfo?.seasons ?? [])
-        .filter(
-          (season) =>
-            season[is4k ? 'status4k' : 'status'] === MediaStatus.AVAILABLE
-        )
-        .map((season) => season.seasonNumber)
-    );
-
-    return (data?.mediaInfo?.requests ?? [])
-      .filter((request) => request.is4k === is4k)
-      .reduce((requestedSeasons, request) => {
-        return [
-          ...requestedSeasons,
-          ...request.seasons
-            .map((sr) => sr.seasonNumber)
-            .filter((seasonNumber) =>
-              isRequestStillBlocking({
-                requestStatus: request.status,
-                isOwnRequest: request.requestedBy.id === user?.id,
-                targetAvailable: availableSeasonNumbers.has(seasonNumber),
-              })
-            ),
-        ];
-      }, [] as number[]);
-  };
+  const getAllRequestedSeasons = (is4k: boolean): number[] =>
+    getBlockedSeasonNumbers({
+      seasons: data?.mediaInfo?.seasons ?? [],
+      requests: data?.mediaInfo?.requests ?? [],
+      userId: user?.id,
+      is4k,
+    });
 
   // Mirrors the season list the request modal offers, so the two agree.
   const requestableSeasons = data.seasons
