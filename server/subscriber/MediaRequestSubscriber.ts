@@ -349,7 +349,7 @@ export class MediaRequestSubscriber implements EntitySubscriberInterface<MediaRe
           }
         }
 
-        const alreadyAvailable =
+        const mediaAlreadyAvailable =
           media[entity.is4k ? 'status4k' : 'status'] === MediaStatus.AVAILABLE;
 
         const radarrMovieOptions: RadarrMovieOptions = {
@@ -389,7 +389,7 @@ export class MediaRequestSubscriber implements EntitySubscriberInterface<MediaRe
               radarrSettings?.id;
             await mediaRepository.save(media);
 
-            if (alreadyAvailable) {
+            if (mediaAlreadyAvailable) {
               logger.info(
                 'Media already available, applied requester tag and marking request as COMPLETED',
                 {
@@ -551,7 +551,7 @@ export class MediaRequestSubscriber implements EntitySubscriberInterface<MediaRe
           throw new Error('Media data not found');
         }
 
-        const alreadyAvailable =
+        const mediaAlreadyAvailable =
           media[entity.is4k ? 'status4k' : 'status'] === MediaStatus.AVAILABLE;
 
         const tmdb = new TheMovieDb();
@@ -563,7 +563,7 @@ export class MediaRequestSubscriber implements EntitySubscriberInterface<MediaRe
         const tvdbId = series.external_ids.tvdb_id ?? media.tvdbId;
 
         if (!tvdbId) {
-          if (!alreadyAvailable) {
+          if (!mediaAlreadyAvailable) {
             const requestRepository = manager.getRepository(MediaRequest);
             await mediaRepository.remove(media);
             await requestRepository.remove(entity);
@@ -737,7 +737,7 @@ export class MediaRequestSubscriber implements EntitySubscriberInterface<MediaRe
             media[entity.is4k ? 'serviceId4k' : 'serviceId'] =
               sonarrSettings?.id;
 
-            if (alreadyAvailable) {
+            if (mediaAlreadyAvailable) {
               logger.info(
                 'Media already available; applied requester tag and marking request as COMPLETED',
                 {

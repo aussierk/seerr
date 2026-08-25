@@ -11,6 +11,10 @@ import OverrideRule from '@server/entity/OverrideRule';
 import type { MediaRequestBody } from '@server/interfaces/api/requestInterfaces';
 import notificationManager, { Notification } from '@server/lib/notifications';
 import { Permission } from '@server/lib/permissions';
+import {
+  isRequestStillBlocking,
+  isSeasonNumberRequestable,
+} from '@server/lib/requestRules';
 import { getSettings } from '@server/lib/settings';
 import logger from '@server/logger';
 import { DbAwareColumn, resolveDbType } from '@server/utils/DbColumnHelper';
@@ -224,9 +228,11 @@ export class MediaRequest {
       const blockingRequest = existing.find(
         (r) =>
           requestBody.mediaType === MediaType.MOVIE &&
-          r.status !== MediaRequestStatus.DECLINED &&
-          r.status !== MediaRequestStatus.COMPLETED &&
-          (r.requestedBy.id === requestUser.id || !mediaAlreadyAvailable)
+          isRequestStillBlocking({
+            requestStatus: r.status,
+            isOwnRequest: r.requestedBy.id === requestUser.id,
+            targetAvailable: mediaAlreadyAvailable,
+          })
       );
       if (blockingRequest) {
         logger.warn('Duplicate request for media blocked', {
@@ -448,9 +454,9 @@ export class MediaRequest {
               .filter((season) => season.season_number !== 0)
               .map((season) => season.season_number)
           : (requestBody.seasons as number[]);
-      if (!settings.main.enableSpecialEpisodes) {
-        requestedSeasons = requestedSeasons.filter((sn) => sn > 0);
-      }
+      requestedSeasons = requestedSeasons.filter((sn) =>
+        isSeasonNumberRequestable(sn, settings.main.enableSpecialEpisodes)
+      );
 
       let existingSeasons: number[] = [];
 
@@ -467,19 +473,16 @@ export class MediaRequest {
         );
 
         existingSeasons = media.requests
-          .filter(
-            (request) =>
-              request.is4k === requestBody.is4k &&
-              request.status !== MediaRequestStatus.DECLINED &&
-              request.status !== MediaRequestStatus.COMPLETED
-          )
+          .filter((request) => request.is4k === requestBody.is4k)
           .reduce((seasons, request) => {
             const blockedSeasons = request.seasons
               .map((s) => s.seasonNumber)
-              .filter(
-                (sn) =>
-                  request.requestedBy.id === requestUser.id ||
-                  !availableSeasonNumbers.has(sn)
+              .filter((sn) =>
+                isRequestStillBlocking({
+                  requestStatus: request.status,
+                  isOwnRequest: request.requestedBy.id === requestUser.id,
+                  targetAvailable: availableSeasonNumbers.has(sn),
+                })
               );
             return [...seasons, ...blockedSeasons];
           }, [] as number[]);
