@@ -488,6 +488,19 @@ const RequestCard = ({ request, onTitleData }: RequestCardProps) => {
                 <Button
                   buttonType="primary"
                   buttonSize="sm"
+                  onClick={() => setShowEditModal(true)}
+                >
+                  <PencilIcon />
+                  <span className="ml-1.5 hidden sm:block">
+                    {intl.formatMessage(messages.editrequest)}
+                  </span>
+                </Button>
+              )}
+            {requestData.status === MediaRequestStatus.FAILED &&
+              hasPermission(Permission.MANAGE_REQUESTS) && (
+                <Button
+                  buttonType="primary"
+                  buttonSize="sm"
                   disabled={isRetrying}
                   onClick={() => retryRequest()}
                 >

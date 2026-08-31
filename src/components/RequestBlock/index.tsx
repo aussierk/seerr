@@ -177,16 +177,20 @@ const RequestBlock = ({ request, onUpdate }: RequestBlockProps) => {
                     <XMarkIcon />
                   </Button>
                 </Tooltip>
-                <Tooltip content={intl.formatMessage(messages.edit)}>
-                  <Button
-                    buttonType="warning"
-                    onClick={() => setShowEditModal(true)}
-                    disabled={isUpdating}
-                  >
-                    <PencilIcon className="icon-sm" />
-                  </Button>
-                </Tooltip>
               </>
+            )}
+            {(request.status === MediaRequestStatus.PENDING ||
+              request.status === MediaRequestStatus.FAILED) && (
+              <Tooltip content={intl.formatMessage(messages.edit)}>
+                <Button
+                  buttonType="warning"
+                  className="mr-1"
+                  onClick={() => setShowEditModal(true)}
+                  disabled={isUpdating}
+                >
+                  <PencilIcon className="icon-sm" />
+                </Button>
+              </Tooltip>
             )}
             {request.status !== MediaRequestStatus.PENDING && (
               <Tooltip content={intl.formatMessage(messages.delete)}>
