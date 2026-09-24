@@ -1,5 +1,6 @@
 import logger from '@server/logger';
 import type { AxiosResponse } from 'axios';
+import { isEqual } from 'lodash';
 import ServarrBase from './base';
 
 export interface RadarrMovieOptions {
@@ -134,6 +135,16 @@ class RadarrAPI extends ServarrBase<{ movieId: number }> {
     return response.data[0];
   }
 
+  // The editor adds to the tags Radarr holds, so a concurrent change to the
+  // movie is not overwritten the way saving a whole copy of it would be
+  private async addTagsToMovie(movieId: number, tags: number[]): Promise<void> {
+    await this.axios.put('/movie/editor', {
+      movieIds: [movieId],
+      tags,
+      applyTags: 'add',
+    });
+  }
+
   public addMovie = async (
     options: RadarrMovieOptions
   ): Promise<RadarrMovie> => {
@@ -141,14 +152,32 @@ class RadarrAPI extends ServarrBase<{ movieId: number }> {
       const movie = await this.getMovieByTmdbId(options.tmdbId);
 
       if (movie.hasFile) {
+        const { tags: mergedTags, changed } = this.mergeTags(
+          movie.tags,
+          options.tags
+        );
+
+        if (!changed) {
+          logger.info(
+            'Title already exists and is available. Skipping add and returning success',
+            {
+              label: 'Radarr',
+              movie,
+            }
+          );
+          return movie;
+        }
+
+        await this.addTagsToMovie(movie.id, options.tags);
         logger.info(
-          'Title already exists and is available. Skipping add and returning success',
+          'Title already exists and is available. Merged requester tag.',
           {
             label: 'Radarr',
-            movie,
+            movieId: movie.id,
+            movieTitle: movie.title,
           }
         );
-        return movie;
+        return { ...movie, tags: mergedTags };
       }
 
       // movie exists in Radarr but is neither downloaded nor monitored
@@ -205,27 +234,44 @@ class RadarrAPI extends ServarrBase<{ movieId: number }> {
 
       if (movie.id) {
         // Movie exists and is already monitored
-        logger.info('Movie is already monitored in Radarr.', {
-          label: 'Radarr',
-          movieId: movie.id,
-          movieTitle: movie.title,
-          hasFile: movie.hasFile,
-        });
-
-        // If searchNow is requested, movie doesn't have a file, and Radarr considers the movie 'available' then trigger search
-        if (options.searchNow && !movie.hasFile && movie.isAvailable) {
+        const { tags: mergedTags, changed: tagsChanged } = this.mergeTags(
+          movie.tags,
+          options.tags
+        );
+        let current = movie;
+        if (tagsChanged) {
+          await this.addTagsToMovie(movie.id, options.tags);
           logger.info(
-            'Triggering search for existing, available, monitored movie without file',
+            'Movie already exists in Radarr and merged requester tag.',
             {
               label: 'Radarr',
               movieId: movie.id,
               movieTitle: movie.title,
             }
           );
-          this.searchMovie(movie.id);
+          current = { ...movie, tags: mergedTags };
+        } else {
+          logger.info('Movie is already monitored in Radarr.', {
+            label: 'Radarr',
+            movieId: movie.id,
+            movieTitle: movie.title,
+            hasFile: movie.hasFile,
+          });
+        }
+        // If searchNow is requested, movie doesn't have a file, and Radarr considers the movie 'available' then trigger search
+        if (options.searchNow && !movie.hasFile && movie.isAvailable) {
+          logger.info(
+            'Triggering search for existing, available, monitored movie without file',
+            {
+              label: 'Radarr',
+              movieId: current.id,
+              movieTitle: current.title,
+            }
+          );
+          this.searchMovie(current.id);
         }
 
-        return movie;
+        return current;
       }
 
       const response = await this.axios.post<RadarrMovie>(`/movie`, {
@@ -271,6 +317,18 @@ class RadarrAPI extends ServarrBase<{ movieId: number }> {
       throw new Error('Failed to add movie to Radarr', { cause: e });
     }
   };
+
+  private mergeTags(
+    existingTags: number[],
+    incomingTags?: number[]
+  ): { tags: number[]; changed: boolean } {
+    if (!incomingTags) {
+      return { tags: existingTags, changed: false };
+    }
+    const merged = Array.from(new Set([...existingTags, ...incomingTags]));
+    const changed = !isEqual(new Set(merged), new Set(existingTags));
+    return { tags: merged, changed };
+  }
 
   public async searchMovie(movieId: number): Promise<void> {
     logger.info('Executing movie search command', {
