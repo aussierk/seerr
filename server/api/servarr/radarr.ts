@@ -1,6 +1,6 @@
 import logger from '@server/logger';
 import type { AxiosResponse } from 'axios';
-import ServarrBase from './base';
+import ServarrBase, { mergeTags } from './base';
 
 export interface RadarrMovieOptions {
   title: string;
@@ -134,6 +134,15 @@ class RadarrAPI extends ServarrBase<{ movieId: number }> {
     return response.data[0];
   }
 
+  // The editor adds to the tags Radarr holds and does not overwrite them
+  private async addTagsToMovie(movieId: number, tags: number[]): Promise<void> {
+    await this.axios.put('/movie/editor', {
+      movieIds: [movieId],
+      tags,
+      applyTags: 'add',
+    });
+  }
+
   public addMovie = async (
     options: RadarrMovieOptions
   ): Promise<RadarrMovie> => {
@@ -141,14 +150,47 @@ class RadarrAPI extends ServarrBase<{ movieId: number }> {
       const movie = await this.getMovieByTmdbId(options.tmdbId);
 
       if (movie.hasFile) {
+        const { tags: mergedTags, changed } = mergeTags(
+          movie.tags,
+          options.tags
+        );
+
+        if (!changed) {
+          logger.info(
+            'Title already exists and is available. Skipping add and returning success',
+            {
+              label: 'Radarr',
+              movie,
+            }
+          );
+          return movie;
+        }
+
+        // A failed tag merge must not fail the request
+        try {
+          await this.addTagsToMovie(movie.id, options.tags);
+        } catch (e) {
+          logger.warn(
+            'Title already exists and is available, but merging the requester tag failed.',
+            {
+              label: 'Radarr',
+              movieId: movie.id,
+              movieTitle: movie.title,
+              errorMessage: e.message,
+            }
+          );
+          return movie;
+        }
+
         logger.info(
-          'Title already exists and is available. Skipping add and returning success',
+          'Title already exists and is available. Merged requester tag.',
           {
             label: 'Radarr',
-            movie,
+            movieId: movie.id,
+            movieTitle: movie.title,
           }
         );
-        return movie;
+        return { ...movie, tags: mergedTags };
       }
 
       // movie exists in Radarr but is neither downloaded nor monitored
@@ -205,27 +247,57 @@ class RadarrAPI extends ServarrBase<{ movieId: number }> {
 
       if (movie.id) {
         // Movie exists and is already monitored
-        logger.info('Movie is already monitored in Radarr.', {
-          label: 'Radarr',
-          movieId: movie.id,
-          movieTitle: movie.title,
-          hasFile: movie.hasFile,
-        });
-
+        const { tags: mergedTags, changed: tagsChanged } = mergeTags(
+          movie.tags,
+          options.tags
+        );
+        let current = movie;
+        if (tagsChanged) {
+          // A failed tag merge must not fail the request
+          try {
+            await this.addTagsToMovie(movie.id, options.tags);
+            logger.info(
+              'Movie already exists in Radarr and merged requester tag.',
+              {
+                label: 'Radarr',
+                movieId: movie.id,
+                movieTitle: movie.title,
+              }
+            );
+            current = { ...movie, tags: mergedTags };
+          } catch (e) {
+            logger.warn(
+              'Movie already exists in Radarr, but merging the requester tag failed.',
+              {
+                label: 'Radarr',
+                movieId: movie.id,
+                movieTitle: movie.title,
+                errorMessage: e.message,
+              }
+            );
+          }
+        } else {
+          logger.info('Movie is already monitored in Radarr.', {
+            label: 'Radarr',
+            movieId: movie.id,
+            movieTitle: movie.title,
+            hasFile: movie.hasFile,
+          });
+        }
         // If searchNow is requested, movie doesn't have a file, and Radarr considers the movie 'available' then trigger search
         if (options.searchNow && !movie.hasFile && movie.isAvailable) {
           logger.info(
             'Triggering search for existing, available, monitored movie without file',
             {
               label: 'Radarr',
-              movieId: movie.id,
-              movieTitle: movie.title,
+              movieId: current.id,
+              movieTitle: current.title,
             }
           );
-          this.searchMovie(movie.id);
+          this.searchMovie(current.id);
         }
 
-        return movie;
+        return current;
       }
 
       const response = await this.axios.post<RadarrMovie>(`/movie`, {
@@ -271,6 +343,22 @@ class RadarrAPI extends ServarrBase<{ movieId: number }> {
       throw new Error('Failed to add movie to Radarr', { cause: e });
     }
   };
+
+  public async addTags(movieId: number, tags: number[]): Promise<void> {
+    const movie = await this.getMovie({ id: movieId });
+    const { changed } = mergeTags(movie.tags, tags);
+
+    if (!changed) {
+      return;
+    }
+
+    await this.addTagsToMovie(movieId, tags);
+    logger.info('Merged requester tag into existing movie in Radarr.', {
+      label: 'Radarr',
+      movieId: movie.id,
+      movieTitle: movie.title,
+    });
+  }
 
   public async searchMovie(movieId: number): Promise<void> {
     logger.info('Executing movie search command', {

@@ -3,6 +3,7 @@ import { afterEach, describe, it, mock } from 'node:test';
 
 import type { AxiosInstance } from 'axios';
 
+import type { SonarrSeries } from '@server/api/servarr/sonarr';
 import SonarrAPI from '@server/api/servarr/sonarr';
 
 function buildSonarr(): SonarrAPI {
@@ -89,6 +90,66 @@ describe('SonarrAPI removeSeries', () => {
         (e as { response?: { status?: number } }).response?.status === 404
     );
     assert.strictEqual(del.mock.callCount(), 0);
+  });
+});
+
+describe('SonarrAPI addTags', () => {
+  afterEach(() => mock.restoreAll());
+
+  it('adds new tags to the existing series through the editor', async () => {
+    const sonarr = buildSonarr();
+    mock.method(getAxios(sonarr), 'get', async () => ({
+      data: { id: 9, title: 'Test Series', tags: [1] },
+    }));
+    const put = mock.method(getAxios(sonarr), 'put', async () => ({
+      data: { id: 9, title: 'Test Series', tags: [1, 2] },
+    }));
+
+    await sonarr.addTags(9, [2]);
+
+    assert.strictEqual(put.mock.callCount(), 1);
+    assert.strictEqual(put.mock.calls[0].arguments[0], '/series/editor');
+    assert.deepStrictEqual(put.mock.calls[0].arguments[1], {
+      seriesIds: [9],
+      tags: [2],
+      applyTags: 'add',
+    });
+  });
+
+  it('does not save when all tags are already present on the series', async () => {
+    const sonarr = buildSonarr();
+    mock.method(getAxios(sonarr), 'get', async () => ({
+      data: { id: 9, title: 'Test Series', tags: [1, 2] },
+    }));
+    const put = mock.method(getAxios(sonarr), 'put', async () => ({}));
+
+    await sonarr.addTags(9, [2]);
+
+    assert.strictEqual(put.mock.callCount(), 0);
+  });
+
+  it('skips the lookup when the series is passed in', async () => {
+    const sonarr = buildSonarr();
+    const get = mock.method(getAxios(sonarr), 'get', async () => {
+      throw new Error('unexpected lookup');
+    });
+    const put = mock.method(getAxios(sonarr), 'put', async () => ({
+      data: { id: 9, title: 'Test Series', tags: [1, 2] },
+    }));
+
+    await sonarr.addTags(9, [2], {
+      id: 9,
+      title: 'Test Series',
+      tags: [1],
+    } as SonarrSeries);
+
+    assert.strictEqual(get.mock.callCount(), 0);
+    assert.strictEqual(put.mock.callCount(), 1);
+    assert.deepStrictEqual(put.mock.calls[0].arguments[1], {
+      seriesIds: [9],
+      tags: [2],
+      applyTags: 'add',
+    });
   });
 });
 

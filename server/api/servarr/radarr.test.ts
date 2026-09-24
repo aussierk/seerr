@@ -93,6 +93,42 @@ describe('RadarrAPI removeMovie', () => {
   });
 });
 
+describe('RadarrAPI addTags', () => {
+  afterEach(() => mock.restoreAll());
+
+  it('adds new tags to the existing movie through the editor', async () => {
+    const radarr = buildRadarr();
+    mock.method(getAxios(radarr), 'get', async () => ({
+      data: { id: 7, title: 'Test Movie', tags: [1] },
+    }));
+    const put = mock.method(getAxios(radarr), 'put', async () => ({
+      data: { id: 7, title: 'Test Movie', tags: [1, 2] },
+    }));
+
+    await radarr.addTags(7, [2]);
+
+    assert.strictEqual(put.mock.callCount(), 1);
+    assert.strictEqual(put.mock.calls[0].arguments[0], '/movie/editor');
+    assert.deepStrictEqual(put.mock.calls[0].arguments[1], {
+      movieIds: [7],
+      tags: [2],
+      applyTags: 'add',
+    });
+  });
+
+  it('does not save when all tags are already present on the movie', async () => {
+    const radarr = buildRadarr();
+    mock.method(getAxios(radarr), 'get', async () => ({
+      data: { id: 7, title: 'Test Movie', tags: [1, 2] },
+    }));
+    const put = mock.method(getAxios(radarr), 'put', async () => ({}));
+
+    await radarr.addTags(7, [2]);
+
+    assert.strictEqual(put.mock.callCount(), 0);
+  });
+});
+
 describe('RadarrAPI getMovieByTmdbId', () => {
   afterEach(() => mock.restoreAll());
 
@@ -122,6 +158,84 @@ describe('RadarrAPI getMovieByTmdbId', () => {
 describe('RadarrAPI addMovie', () => {
   afterEach(() => mock.restoreAll());
 
+  const mergeOptions: RadarrMovieOptions = {
+    title: 'Test Movie',
+    qualityProfileId: 1,
+    minimumAvailability: 'Released',
+    tags: [2],
+    profileId: 1,
+    year: 2026,
+    rootFolderPath: '/movies',
+    tmdbId: 7,
+    searchNow: false,
+  };
+
+  for (const [name, hasFile] of [
+    ['an available movie', true],
+    ['a monitored movie without a file', false],
+  ] as const) {
+    it(`adds the requester tags to ${name} through the editor`, async () => {
+      const radarr = buildRadarr();
+      mock.method(RadarrAPI.prototype, 'getMovieByTmdbId', async () => ({
+        id: 7,
+        title: 'Test Movie',
+        monitored: true,
+        hasFile,
+        isAvailable: false,
+        tags: [1],
+      }));
+      const put = mock.method(getAxios(radarr), 'put', async () => ({}));
+
+      const result = await radarr.addMovie(mergeOptions);
+
+      assert.strictEqual(put.mock.callCount(), 1);
+      assert.strictEqual(put.mock.calls[0].arguments[0], '/movie/editor');
+      assert.deepStrictEqual(put.mock.calls[0].arguments[1], {
+        movieIds: [7],
+        tags: [2],
+        applyTags: 'add',
+      });
+      assert.deepStrictEqual(result.tags, [1, 2]);
+    });
+
+    it(`does not save ${name} that already has the requester tags`, async () => {
+      const radarr = buildRadarr();
+      mock.method(RadarrAPI.prototype, 'getMovieByTmdbId', async () => ({
+        id: 7,
+        title: 'Test Movie',
+        monitored: true,
+        hasFile,
+        isAvailable: false,
+        tags: [1, 2],
+      }));
+      const put = mock.method(getAxios(radarr), 'put', async () => ({}));
+
+      await radarr.addMovie(mergeOptions);
+
+      assert.strictEqual(put.mock.callCount(), 0);
+    });
+
+    it(`still succeeds for ${name} when merging the tags fails`, async () => {
+      const radarr = buildRadarr();
+      mock.method(RadarrAPI.prototype, 'getMovieByTmdbId', async () => ({
+        id: 7,
+        title: 'Test Movie',
+        monitored: true,
+        hasFile,
+        isAvailable: false,
+        tags: [1],
+      }));
+      mock.method(getAxios(radarr), 'put', async () => {
+        throw new Error('editor unavailable');
+      });
+
+      const result = await radarr.addMovie(mergeOptions);
+
+      assert.strictEqual(result.id, 7);
+      assert.deepStrictEqual(result.tags, [1]);
+    });
+  }
+
   it('does not trigger a search for an existing, monitored movie that is not yet available', async () => {
     const radarr = buildRadarr();
     const options: RadarrMovieOptions = {
@@ -141,6 +255,7 @@ describe('RadarrAPI addMovie', () => {
       monitored: true,
       hasFile: false,
       isAvailable: false,
+      tags: [],
     }));
 
     const search = mock.method(
@@ -172,6 +287,7 @@ describe('RadarrAPI addMovie', () => {
       monitored: true,
       hasFile: false,
       isAvailable: true,
+      tags: [],
     }));
 
     const search = mock.method(

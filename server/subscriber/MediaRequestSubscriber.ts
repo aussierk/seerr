@@ -18,7 +18,11 @@ import { MediaRequest } from '@server/entity/MediaRequest';
 import Season from '@server/entity/Season';
 import SeasonRequest from '@server/entity/SeasonRequest';
 import notificationManager, { Notification } from '@server/lib/notifications';
-import { getSettings } from '@server/lib/settings';
+import {
+  getSettings,
+  type DVRSettings,
+  type SonarrSettings,
+} from '@server/lib/settings';
 import logger from '@server/logger';
 import { withNestedTransaction } from '@server/utils/nestedTransaction';
 import { isEqual, truncate } from 'lodash';
@@ -29,7 +33,7 @@ import type {
   RemoveEvent,
   UpdateEvent,
 } from 'typeorm';
-import { EventSubscriber, Not } from 'typeorm';
+import { EventSubscriber, In, Not } from 'typeorm';
 
 const sanitizeDisplayName = (displayName: string): string => {
   return displayName
@@ -43,6 +47,162 @@ const sanitizeDisplayName = (displayName: string): string => {
 
 @EventSubscriber()
 export class MediaRequestSubscriber implements EntitySubscriberInterface<MediaRequest> {
+  private async getOrCreateUserTag(
+    api: RadarrAPI | SonarrAPI,
+    serverName: string,
+    entity: MediaRequest
+  ): Promise<number | null> {
+    const existingTags = await api.getTags();
+    // old tags had space around the hyphen
+    let userTag = existingTags.find((v) =>
+      v.label.startsWith(entity.requestedBy.id + ' - ')
+    );
+    // new tags do not have spaces around the hyphen, since spaces are not allowed anymore
+    if (!userTag) {
+      userTag = existingTags.find((v) =>
+        v.label.startsWith(entity.requestedBy.id + '-')
+      );
+    }
+    if (!userTag) {
+      const newTag =
+        entity.requestedBy.id +
+        '-' +
+        sanitizeDisplayName(entity.requestedBy.displayName);
+      logger.info('Requester has no active tag. Creating new', {
+        label: 'Media Request',
+        requestId: entity.id,
+        mediaId: entity.media.id,
+        userId: entity.requestedBy.id,
+        newTag,
+      });
+      userTag = await api.createTag({ label: newTag });
+    }
+    if (userTag.id) {
+      return userTag.id;
+    }
+    logger.warn('Requester has no tag and failed to add one', {
+      label: 'Media Request',
+      requestId: entity.id,
+      mediaId: entity.media.id,
+      userId: entity.requestedBy.id,
+      server: serverName,
+    });
+    return null;
+  }
+
+  private existingItemId(
+    entity: MediaRequest,
+    media: Media,
+    server: DVRSettings
+  ): number | undefined {
+    if (media[entity.is4k ? 'serviceId4k' : 'serviceId'] !== server.id) {
+      return undefined;
+    }
+    return (
+      media[entity.is4k ? 'externalServiceId4k' : 'externalServiceId'] ??
+      undefined
+    );
+  }
+
+  // Whether the media sits on a different configured server than the request
+  // targets, which must still be sent there.
+  private isOnOtherServer(
+    entity: MediaRequest,
+    media: Media,
+    server: DVRSettings,
+    servers: DVRSettings[]
+  ): boolean {
+    const recorded = media[entity.is4k ? 'serviceId4k' : 'serviceId'];
+
+    return (
+      recorded != null &&
+      recorded !== server.id &&
+      servers.some(
+        (other) => other.id === recorded && other.is4k === entity.is4k
+      )
+    );
+  }
+
+  private async bestEffort(
+    entity: MediaRequest,
+    action: string,
+    run: () => Promise<void>
+  ): Promise<void> {
+    try {
+      await run();
+    } catch (e) {
+      logger.warn(`Failed to ${action}, continuing with the request`, {
+        label: 'Media Request',
+        requestId: entity.id,
+        mediaId: entity.media.id,
+        errorMessage: e instanceof Error ? e.message : String(e),
+      });
+    }
+  }
+
+  private async syncExistingItem(
+    entity: MediaRequest,
+    api: RadarrAPI | SonarrAPI,
+    server: DVRSettings,
+    itemId: number,
+    { tags, existing }: { tags: number[]; existing?: SonarrSeries }
+  ): Promise<void> {
+    await this.bestEffort(
+      entity,
+      'apply tags to the existing item',
+      async () => {
+        const merged = [...tags];
+        if (server.tagRequests) {
+          // a failed lookup still applies the configured tags
+          await this.bestEffort(
+            entity,
+            'resolve the requester tag',
+            async () => {
+              const userTagId = await this.getOrCreateUserTag(
+                api,
+                `${server.hostname}:${server.port}`,
+                entity
+              );
+              if (userTagId && !merged.includes(userTagId)) {
+                merged.push(userTagId);
+              }
+            }
+          );
+        }
+        if (merged.length === 0) {
+          return;
+        }
+        if (api instanceof SonarrAPI) {
+          await api.addTags(itemId, merged, existing);
+        } else {
+          await api.addTags(itemId, merged);
+        }
+      }
+    );
+  }
+
+  // The server's tags, or the request's own when it overrides them. Always a
+  // copy, so the requester tag never mutates the settings.
+  private getSonarrTags(
+    entity: MediaRequest,
+    server: SonarrSettings,
+    isAnime: boolean
+  ): number[] {
+    const configured = [...((isAnime ? server.animeTags : server.tags) ?? [])];
+
+    if (entity.tags && !isEqual(entity.tags, configured)) {
+      logger.info(`Request has override tags`, {
+        label: 'Media Request',
+        requestId: entity.id,
+        mediaId: entity.media.id,
+        tagIds: entity.tags,
+      });
+      return [...entity.tags];
+    }
+
+    return configured;
+  }
+
   private async notifyAvailableMovie(
     entity: MediaRequest,
     event?: UpdateEvent<MediaRequest>
@@ -342,7 +502,7 @@ export class MediaRequestSubscriber implements EntitySubscriberInterface<MediaRe
         }
 
         if (entity.tags && !isEqual(entity.tags, radarrSettings.tags)) {
-          tags = entity.tags;
+          tags = [...entity.tags];
           logger.info(`Request has override tags`, {
             label: 'Media Request',
             requestId: entity.id,
@@ -365,13 +525,30 @@ export class MediaRequestSubscriber implements EntitySubscriberInterface<MediaRe
         }
 
         if (
-          media[entity.is4k ? 'status4k' : 'status'] === MediaStatus.AVAILABLE
+          media[entity.is4k ? 'status4k' : 'status'] ===
+            MediaStatus.AVAILABLE &&
+          !this.isOnOtherServer(entity, media, radarrSettings, settings.radarr)
         ) {
           logger.warn('Media already exists, marking request as COMPLETED', {
             label: 'Media Request',
             requestId: entity.id,
             mediaId: entity.media.id,
           });
+
+          const itemId = this.existingItemId(entity, media, radarrSettings);
+          if (itemId) {
+            const radarr = new RadarrAPI({
+              apiKey: radarrSettings.apiKey,
+              url: RadarrAPI.buildUrl(radarrSettings, '/api/v3'),
+            });
+            await this.syncExistingItem(
+              entity,
+              radarr,
+              radarrSettings,
+              itemId,
+              { tags }
+            );
+          }
 
           const requestRepository = manager.getRepository(MediaRequest);
           entity.status = MediaRequestStatus.COMPLETED;
@@ -387,47 +564,13 @@ export class MediaRequestSubscriber implements EntitySubscriberInterface<MediaRe
         const movie = await tmdb.getMovie({ movieId: entity.media.tmdbId });
 
         if (radarrSettings.tagRequests) {
-          const radarrTags = await radarr.getTags();
-          // old tags had space around the hyphen
-          let userTag = radarrTags.find((v) =>
-            v.label.startsWith(entity.requestedBy.id + ' - ')
+          const userTagId = await this.getOrCreateUserTag(
+            radarr,
+            `${radarrSettings.hostname}:${radarrSettings.port}`,
+            entity
           );
-          // new tags do not have spaces around the hyphen, since spaces are not allowed anymore
-          if (!userTag) {
-            userTag = radarrTags.find((v) =>
-              v.label.startsWith(entity.requestedBy.id + '-')
-            );
-          }
-          if (!userTag) {
-            logger.info(`Requester has no active tag. Creating new`, {
-              label: 'Media Request',
-              requestId: entity.id,
-              mediaId: entity.media.id,
-              userId: entity.requestedBy.id,
-              newTag:
-                entity.requestedBy.id +
-                '-' +
-                sanitizeDisplayName(entity.requestedBy.displayName),
-            });
-            userTag = await radarr.createTag({
-              label:
-                entity.requestedBy.id +
-                '-' +
-                sanitizeDisplayName(entity.requestedBy.displayName),
-            });
-          }
-          if (userTag.id) {
-            if (!tags?.find((v) => v === userTag?.id)) {
-              tags?.push(userTag.id);
-            }
-          } else {
-            logger.warn(`Requester has no tag and failed to add one`, {
-              label: 'Media Request',
-              requestId: entity.id,
-              mediaId: entity.media.id,
-              userId: entity.requestedBy.id,
-              radarrServer: radarrSettings.hostname + ':' + radarrSettings.port,
-            });
+          if (userTagId && !tags.find((v) => v === userTagId)) {
+            tags.push(userTagId);
           }
         }
 
@@ -459,14 +602,23 @@ export class MediaRequestSubscriber implements EntitySubscriberInterface<MediaRe
               throw new Error('Media data not found');
             }
 
-            media[entity.is4k ? 'externalServiceId4k' : 'externalServiceId'] =
-              radarrMovie.id;
-            media[
-              entity.is4k ? 'externalServiceSlug4k' : 'externalServiceSlug'
-            ] = radarrMovie.titleSlug;
-            media[entity.is4k ? 'serviceId4k' : 'serviceId'] =
-              radarrSettings?.id;
-            await mediaRepository.save(media);
+            if (
+              !this.isOnOtherServer(
+                entity,
+                media,
+                radarrSettings,
+                getSettings().radarr
+              )
+            ) {
+              media[entity.is4k ? 'externalServiceId4k' : 'externalServiceId'] =
+                radarrMovie.id;
+              media[
+                entity.is4k ? 'externalServiceSlug4k' : 'externalServiceSlug'
+              ] = radarrMovie.titleSlug;
+              media[entity.is4k ? 'serviceId4k' : 'serviceId'] =
+                radarrSettings?.id;
+              await mediaRepository.save(media);
+            }
           })
           .catch(async () => {
             try {
@@ -605,13 +757,44 @@ export class MediaRequestSubscriber implements EntitySubscriberInterface<MediaRe
         }
 
         if (
-          media[entity.is4k ? 'status4k' : 'status'] === MediaStatus.AVAILABLE
+          media[entity.is4k ? 'status4k' : 'status'] ===
+            MediaStatus.AVAILABLE &&
+          !this.isOnOtherServer(entity, media, sonarrSettings, settings.sonarr)
         ) {
           logger.warn('Media already exists, marking request as COMPLETED', {
             label: 'Media Request',
             requestId: entity.id,
             mediaId: entity.media.id,
           });
+
+          const itemId = this.existingItemId(entity, media, sonarrSettings);
+          if (itemId) {
+            const sonarr = new SonarrAPI({
+              apiKey: sonarrSettings.apiKey,
+              url: SonarrAPI.buildUrl(sonarrSettings, '/api/v3'),
+            });
+            await this.bestEffort(
+              entity,
+              'read the existing series',
+              async () => {
+                const existing = await sonarr.getSeriesById(itemId);
+                await this.syncExistingItem(
+                  entity,
+                  sonarr,
+                  sonarrSettings,
+                  itemId,
+                  {
+                    tags: this.getSonarrTags(
+                      entity,
+                      sonarrSettings,
+                      existing.seriesType === 'anime'
+                    ),
+                    existing,
+                  }
+                );
+              }
+            );
+          }
 
           const requestRepository = manager.getRepository(MediaRequest);
           entity.status = MediaRequestStatus.COMPLETED;
@@ -662,13 +845,11 @@ export class MediaRequestSubscriber implements EntitySubscriberInterface<MediaRe
           isAnime && sonarrSettings.activeAnimeLanguageProfileId
             ? sonarrSettings.activeAnimeLanguageProfileId
             : sonarrSettings.activeLanguageProfileId;
-        let tags = isAnime
-          ? sonarrSettings.animeTags
-            ? [...sonarrSettings.animeTags]
-            : []
-          : sonarrSettings.tags
-            ? [...sonarrSettings.tags]
-            : [];
+        const tags = this.getSonarrTags(
+          entity,
+          sonarrSettings,
+          isAnime
+        );
 
         if (
           entity.rootFolder &&
@@ -710,58 +891,14 @@ export class MediaRequestSubscriber implements EntitySubscriberInterface<MediaRe
           );
         }
 
-        if (entity.tags && !isEqual(entity.tags, tags)) {
-          tags = entity.tags;
-          logger.info(`Request has override tags`, {
-            label: 'Media Request',
-            requestId: entity.id,
-            mediaId: entity.media.id,
-            tagIds: tags,
-          });
-        }
-
         if (sonarrSettings.tagRequests) {
-          const sonarrTags = await sonarr.getTags();
-          // old tags had space around the hyphen
-          let userTag = sonarrTags.find((v) =>
-            v.label.startsWith(entity.requestedBy.id + ' - ')
+          const userTagId = await this.getOrCreateUserTag(
+            sonarr,
+            `${sonarrSettings.hostname}:${sonarrSettings.port}`,
+            entity
           );
-          // new tags do not have spaces around the hyphen, since spaces are not allowed anymore
-          if (!userTag) {
-            userTag = sonarrTags.find((v) =>
-              v.label.startsWith(entity.requestedBy.id + '-')
-            );
-          }
-          if (!userTag) {
-            logger.info(`Requester has no active tag. Creating new`, {
-              label: 'Media Request',
-              requestId: entity.id,
-              mediaId: entity.media.id,
-              userId: entity.requestedBy.id,
-              newTag:
-                entity.requestedBy.id +
-                '-' +
-                sanitizeDisplayName(entity.requestedBy.displayName),
-            });
-            userTag = await sonarr.createTag({
-              label:
-                entity.requestedBy.id +
-                '-' +
-                sanitizeDisplayName(entity.requestedBy.displayName),
-            });
-          }
-          if (userTag.id) {
-            if (!tags?.find((v) => v === userTag?.id)) {
-              tags?.push(userTag.id);
-            }
-          } else {
-            logger.warn(`Requester has no tag and failed to add one`, {
-              label: 'Media Request',
-              requestId: entity.id,
-              mediaId: entity.media.id,
-              userId: entity.requestedBy.id,
-              sonarrServer: sonarrSettings.hostname + ':' + sonarrSettings.port,
-            });
+          if (userTagId && !tags.find((v) => v === userTagId)) {
+            tags.push(userTagId);
           }
         }
 
@@ -795,14 +932,23 @@ export class MediaRequestSubscriber implements EntitySubscriberInterface<MediaRe
               throw new Error('Media data not found');
             }
 
-            media[entity.is4k ? 'externalServiceId4k' : 'externalServiceId'] =
-              sonarrSeries.id;
-            media[
-              entity.is4k ? 'externalServiceSlug4k' : 'externalServiceSlug'
-            ] = sonarrSeries.titleSlug;
-            media[entity.is4k ? 'serviceId4k' : 'serviceId'] =
-              sonarrSettings?.id;
-            await mediaRepository.save(media);
+            if (
+              !this.isOnOtherServer(
+                entity,
+                media,
+                sonarrSettings,
+                getSettings().sonarr
+              )
+            ) {
+              media[entity.is4k ? 'externalServiceId4k' : 'externalServiceId'] =
+                sonarrSeries.id;
+              media[
+                entity.is4k ? 'externalServiceSlug4k' : 'externalServiceSlug'
+              ] = sonarrSeries.titleSlug;
+              media[entity.is4k ? 'serviceId4k' : 'serviceId'] =
+                sonarrSettings?.id;
+              await mediaRepository.save(media);
+            }
           })
           .catch(async () => {
             try {
@@ -920,10 +1066,24 @@ export class MediaRequestSubscriber implements EntitySubscriberInterface<MediaRe
     if (
       media.mediaType === MediaType.MOVIE &&
       entity.status === MediaRequestStatus.DECLINED &&
-      media[statusKey] !== MediaStatus.DELETED
+      media[statusKey] !== MediaStatus.DELETED &&
+      media[statusKey] !== MediaStatus.AVAILABLE
     ) {
-      media[statusKey] = MediaStatus.UNKNOWN;
-      await mediaRepository.save(media);
+      const activeCount = await requestRepository.count({
+        where: {
+          media: { id: media.id },
+          status: Not(
+            In([MediaRequestStatus.DECLINED, MediaRequestStatus.COMPLETED])
+          ),
+          is4k: entity.is4k,
+          id: Not(entity.id),
+        },
+      });
+
+      if (activeCount === 0) {
+        media[statusKey] = MediaStatus.UNKNOWN;
+        await mediaRepository.save(media);
+      }
     }
 
     /**
