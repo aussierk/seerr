@@ -21,7 +21,9 @@ import type {
   MediaRequestBody,
   RequestResultsResponse,
 } from '@server/interfaces/api/requestInterfaces';
+import { hasOwnMovieRequest } from '@server/lib/ownMovieRequest';
 import { Permission } from '@server/lib/permissions';
+import { getOwnBlockedSeasons } from '@server/lib/requestSeasons';
 import { getSettings } from '@server/lib/settings';
 import logger from '@server/logger';
 import { isAuthenticated } from '@server/middleware/auth';
@@ -589,13 +591,43 @@ requestRoutes.put<{ requestId: string }>(
               }
             }
 
-            request.serverId = effectiveServerId;
-            request.profileId = req.body.profileId;
-            request.rootFolder = req.body.rootFolder;
-            request.tags = req.body.tags;
-            request.requestedBy = requestUser as User;
+            return mediaLock.dispatch(
+              mediaKey(MediaType.MOVIE, request.media.tmdbId),
+              async () => {
+                if (ownerChanging) {
+                  const siblings = await requestRepository.find({
+                    where: { media: { id: request.media.id } },
+                    relations: { requestedBy: true },
+                  });
 
-            await requestRepository.save(request);
+                  if (
+                    hasOwnMovieRequest({
+                      requests: siblings.filter((r) => r.id !== request.id),
+                      mediaStatus:
+                        request.media[request.is4k ? 'status4k' : 'status'],
+                      userId: requestUser.id,
+                      is4k: request.is4k,
+                    })
+                  ) {
+                    return next({
+                      status: 409,
+                      message:
+                        'That user already has a request for this media.',
+                    });
+                  }
+                }
+
+                request.serverId = effectiveServerId;
+                request.profileId = req.body.profileId;
+                request.rootFolder = req.body.rootFolder;
+                request.tags = req.body.tags;
+                request.requestedBy = requestUser as User;
+
+                await requestRepository.save(request);
+
+                return res.status(200).json(request);
+              }
+            );
           } else if (request.type === MediaType.TV) {
             const mediaRepository = getRepository(Media);
             if (
@@ -636,62 +668,43 @@ requestRoutes.put<{ requestId: string }>(
                   relations: { requests: true },
                 });
 
-                // Get all requested seasons that are not part of this request we are editing
-                const existingSeasons = media.requests
-                  .filter(
-                    (r) =>
-                      r.is4k === request.is4k &&
-                      r.id !== request.id &&
-                      r.status !== MediaRequestStatus.DECLINED &&
-                      r.status !== MediaRequestStatus.COMPLETED
-                  )
-                  .reduce((seasons, r) => {
-                    const combinedSeasons = r.seasons.map(
-                      (season) => season.seasonNumber
-                    );
-
-                    return [...seasons, ...combinedSeasons];
-                  }, [] as number[]);
+                const otherRequests = media.requests.filter(
+                  (r) => r.is4k === request.is4k && r.id !== request.id
+                );
 
                 const currentSeasons = request.seasons.map(
                   (s) => s.seasonNumber
                 );
 
-                // Seasons the media already covers cannot be requested again, while
-                // the ones this request holds stay on it
-                const coveredSeasons = (media.seasons ?? [])
-                  .filter(
-                    (season) =>
-                      season[request.is4k ? 'status4k' : 'status'] !==
-                        MediaStatus.UNKNOWN &&
-                      season[request.is4k ? 'status4k' : 'status'] !==
-                        MediaStatus.DELETED
-                  )
-                  .map((season) => season.seasonNumber)
-                  .filter((sn) => !currentSeasons.includes(sn));
+                const ownSeasons = getOwnBlockedSeasons({
+                  requests: otherRequests,
+                  seasons: media.seasons ?? [],
+                  userId: requestUser.id,
+                  is4k: request.is4k,
+                });
 
-                const filteredSeasons = requestedSeasons.filter(
-                  (rs) => !existingSeasons.includes(rs)
-                );
-
-                const keptSeasons = filteredSeasons.filter((sn) =>
-                  currentSeasons.includes(sn)
-                );
-
-                const newSeasons = filteredSeasons.filter(
+                // A new owner cannot keep a season they already hold elsewhere
+                const keptSeasons = requestedSeasons.filter(
                   (sn) =>
-                    !currentSeasons.includes(sn) && !coveredSeasons.includes(sn)
+                    currentSeasons.includes(sn) &&
+                    !(ownerChanging && ownSeasons.includes(sn))
                 );
 
-                const resultingSeasonCount =
-                  keptSeasons.length + newSeasons.length;
+                const newSeasons = requestedSeasons.filter(
+                  (sn) =>
+                    !currentSeasons.includes(sn) && !ownSeasons.includes(sn)
+                );
 
-                if (resultingSeasonCount === 0) {
+                const finalSeasons = [...keptSeasons, ...newSeasons];
+
+                if (finalSeasons.length === 0) {
                   return next({
                     status: 202,
                     message: 'No seasons available to request',
                   });
                 }
+
+                const resultingSeasonCount = finalSeasons.length;
 
                 if (!request.ignoreQuota) {
                   const quotas = await requestUser.getQuota();
