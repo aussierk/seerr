@@ -432,14 +432,14 @@ async function seedTvRequest(
 }
 
 describe('PUT /request/:requestId (tv)', () => {
-  it('does not add a season held by another request', async () => {
+  it('allows adding a season held by another request when conditions match', async () => {
     const requestRepo = getRepository(MediaRequest);
 
     const owner = await seedUser('admin@seerr.dev');
     const otherUser = await seedUser('demo@seerr.dev');
 
     const mediaRequest = await seedTvRequest(owner, [1, 2]);
-    const otherRequest = await seedTvRequest(otherUser, [3]);
+    await seedTvRequest(otherUser, [3]);
 
     const agent = await loginAs('admin@seerr.dev', 'test1234');
     const res = await agent.put(`/request/${mediaRequest.id}`).send({
@@ -454,19 +454,93 @@ describe('PUT /request/:requestId (tv)', () => {
     });
     assert.deepStrictEqual(
       saved.seasons.map((s) => s.seasonNumber).sort((a, b) => a - b),
-      [1, 2]
-    );
-
-    const otherSaved = await requestRepo.findOneOrFail({
-      where: { id: otherRequest.id },
-    });
-    assert.deepStrictEqual(
-      otherSaved.seasons.map((s) => s.seasonNumber),
-      [3]
+      [1, 2, 3]
     );
   });
 
-  it('gives a season to only one of two concurrent edits', async () => {
+  it('lets a season held by another user on different conditions be added', async () => {
+    const requestRepo = getRepository(MediaRequest);
+
+    const owner = await seedUser('admin@seerr.dev');
+    const otherUser = await seedUser('demo@seerr.dev');
+
+    const mediaRequest = await seedTvRequest(owner, [1, 2]);
+    const otherRequest = await seedTvRequest(otherUser, [3]);
+    otherRequest.profileId = 7;
+    await requestRepo.save(otherRequest);
+
+    const agent = await loginAs('admin@seerr.dev', 'test1234');
+    const res = await agent.put(`/request/${mediaRequest.id}`).send({
+      mediaType: MediaType.TV,
+      seasons: [1, 2, 3],
+    });
+
+    assert.strictEqual(res.status, 200);
+
+    const saved = await requestRepo.findOneOrFail({
+      where: { id: mediaRequest.id },
+    });
+    assert.deepStrictEqual(
+      saved.seasons.map((s) => s.seasonNumber).sort((a, b) => a - b),
+      [1, 2, 3]
+    );
+  });
+
+  it('allows adding a season held by a request on a different server', async () => {
+    configureSonarr([{}, { id: 1 }]);
+    const requestRepo = getRepository(MediaRequest);
+
+    const owner = await seedUser('admin@seerr.dev');
+    const otherUser = await seedUser('demo@seerr.dev');
+
+    const mediaRequest = await seedTvRequest(owner, [1, 2]);
+    const otherRequest = await seedTvRequest(otherUser, [3]);
+    otherRequest.serverId = 1;
+    otherRequest.profileId = 7;
+    await requestRepo.save(otherRequest);
+
+    const agent = await loginAs('admin@seerr.dev', 'test1234');
+    const res = await agent.put(`/request/${mediaRequest.id}`).send({
+      mediaType: MediaType.TV,
+      seasons: [1, 2, 3],
+    });
+
+    assert.strictEqual(res.status, 200);
+
+    const saved = await requestRepo.findOneOrFail({
+      where: { id: mediaRequest.id },
+    });
+    assert.deepStrictEqual(
+      saved.seasons.map((s) => s.seasonNumber).sort((a, b) => a - b),
+      [1, 2, 3]
+    );
+  });
+
+  it('does not add a season the requester already holds on another request', async () => {
+    const requestRepo = getRepository(MediaRequest);
+    const owner = await seedUser('demo@seerr.dev');
+
+    const requestA = await seedTvRequest(owner, [1]);
+    await seedTvRequest(owner, [2]);
+
+    const agent = await loginAs('demo@seerr.dev', 'test1234');
+    const res = await agent.put(`/request/${requestA.id}`).send({
+      mediaType: MediaType.TV,
+      seasons: [1, 2],
+    });
+
+    assert.strictEqual(res.status, 200);
+
+    const saved = await requestRepo.findOneOrFail({
+      where: { id: requestA.id },
+    });
+    assert.deepStrictEqual(
+      saved.seasons.map((s) => s.seasonNumber).sort((a, b) => a - b),
+      [1]
+    );
+  });
+
+  it('lets both concurrent edits add the same season when conditions match', async () => {
     const requestRepo = getRepository(MediaRequest);
 
     const owner = await seedUser('admin@seerr.dev');
@@ -500,19 +574,19 @@ describe('PUT /request/:requestId (tv)', () => {
     const holders = [saved, otherSaved].filter((r) =>
       r.seasons.some((s) => s.seasonNumber === 2)
     );
-    assert.strictEqual(holders.length, 1);
+    assert.strictEqual(holders.length, 2);
 
     assert.deepStrictEqual(
       [...saved.seasons, ...otherSaved.seasons]
         .map((s) => s.seasonNumber)
         .sort((a, b) => a - b),
-      [1, 2, 3]
+      [1, 2, 2, 3]
     );
   });
 });
 
 describe('PUT /request/:requestId (season availability)', () => {
-  it('does not add a season the media already has', async () => {
+  it('adds a season the media already has', async () => {
     const requestRepo = getRepository(MediaRequest);
     const owner = await seedUser('demo@seerr.dev');
     const mediaRequest = await seedTvRequest(owner, [1]);
@@ -533,16 +607,14 @@ describe('PUT /request/:requestId (season availability)', () => {
     });
     assert.deepStrictEqual(
       saved.seasons.map((s) => s.seasonNumber).sort((a, b) => a - b),
-      [1, 3]
+      [1, 2, 3]
     );
   });
 
-  it('returns 202 when every requested season is already covered', async () => {
+  it('returns 202 when every requested season is already held by the owner', async () => {
     const owner = await seedUser('demo@seerr.dev');
     const mediaRequest = await seedTvRequest(owner, [1]);
-    await seedMediaSeasons(67890, [
-      { seasonNumber: 2, status: MediaStatus.AVAILABLE },
-    ]);
+    await seedTvRequest(owner, [2]);
 
     const agent = await loginAs('demo@seerr.dev', 'test1234');
     const res = await agent.put(`/request/${mediaRequest.id}`).send({
@@ -583,9 +655,9 @@ describe('PUT /request/:requestId (season availability)', () => {
     assert.strictEqual(saved.serverId, 3);
   });
 
-  it('does not charge quota for a season the media already has', async () => {
+  it('charges quota for a season the media already has', async () => {
     const requestRepo = getRepository(MediaRequest);
-    const owner = await seedUser('demo@seerr.dev', { tvQuotaLimit: 1 });
+    const owner = await seedUser('demo@seerr.dev', { tvQuotaLimit: 2 });
     const mediaRequest = await seedTvRequest(owner, [1]);
     await seedMediaSeasons(67890, [
       { seasonNumber: 2, status: MediaStatus.AVAILABLE },
@@ -603,8 +675,8 @@ describe('PUT /request/:requestId (season availability)', () => {
       where: { id: mediaRequest.id },
     });
     assert.deepStrictEqual(
-      saved.seasons.map((s) => s.seasonNumber),
-      [1]
+      saved.seasons.map((s) => s.seasonNumber).sort((a, b) => a - b),
+      [1, 2]
     );
   });
 });

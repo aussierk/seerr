@@ -22,6 +22,7 @@ import type {
   RequestResultsResponse,
 } from '@server/interfaces/api/requestInterfaces';
 import { Permission } from '@server/lib/permissions';
+import { getOwnBlockedSeasons } from '@server/lib/requestSeasons';
 import { getSettings } from '@server/lib/settings';
 import logger from '@server/logger';
 import { isAuthenticated } from '@server/middleware/auth';
@@ -34,7 +35,6 @@ import requestLock, {
 import { Router } from 'express';
 
 const requestRoutes = Router();
-
 requestRoutes.get<Record<string, unknown>, RequestResultsResponse>(
   '/',
   async (req, res, next) => {
@@ -590,62 +590,42 @@ requestRoutes.put<{ requestId: string }>(
                   relations: { requests: true },
                 });
 
-                // Get all requested seasons that are not part of this request we are editing
-                const existingSeasons = media.requests
-                  .filter(
-                    (r) =>
-                      r.is4k === request.is4k &&
-                      r.id !== request.id &&
-                      r.status !== MediaRequestStatus.DECLINED &&
-                      r.status !== MediaRequestStatus.COMPLETED
-                  )
-                  .reduce((seasons, r) => {
-                    const combinedSeasons = r.seasons.map(
-                      (season) => season.seasonNumber
-                    );
-
-                    return [...seasons, ...combinedSeasons];
-                  }, [] as number[]);
+                const otherRequests = media.requests.filter(
+                  (r) => r.is4k === request.is4k && r.id !== request.id
+                );
 
                 const currentSeasons = request.seasons.map(
                   (s) => s.seasonNumber
                 );
 
-                // Seasons the media already covers cannot be requested again, while
-                // the ones this request holds stay on it
-                const coveredSeasons = (media.seasons ?? [])
-                  .filter(
-                    (season) =>
-                      season[request.is4k ? 'status4k' : 'status'] !==
-                        MediaStatus.UNKNOWN &&
-                      season[request.is4k ? 'status4k' : 'status'] !==
-                        MediaStatus.DELETED
-                  )
-                  .map((season) => season.seasonNumber)
-                  .filter((sn) => !currentSeasons.includes(sn));
+                // The requester's own seasons on other requests stay there.
+                // Seasons held or available through other users do not block.
+                const ownSeasons = getOwnBlockedSeasons({
+                  requests: otherRequests,
+                  seasons: media.seasons ?? [],
+                  userId: requestUser.id,
+                  is4k: request.is4k,
+                });
 
-                const filteredSeasons = requestedSeasons.filter(
-                  (rs) => !existingSeasons.includes(rs)
-                );
-
-                const keptSeasons = filteredSeasons.filter((sn) =>
+                const keptSeasons = requestedSeasons.filter((sn) =>
                   currentSeasons.includes(sn)
                 );
 
-                const newSeasons = filteredSeasons.filter(
+                const newSeasons = requestedSeasons.filter(
                   (sn) =>
-                    !currentSeasons.includes(sn) && !coveredSeasons.includes(sn)
+                    !currentSeasons.includes(sn) && !ownSeasons.includes(sn)
                 );
 
-                const resultingSeasonCount =
-                  keptSeasons.length + newSeasons.length;
+                const finalSeasons = [...keptSeasons, ...newSeasons];
 
-                if (resultingSeasonCount === 0) {
+                if (finalSeasons.length === 0) {
                   return next({
                     status: 202,
                     message: 'No seasons available to request',
                   });
                 }
+
+                const resultingSeasonCount = finalSeasons.length;
 
                 if (!request.ignoreQuota) {
                   const quotas = await requestUser.getQuota();
