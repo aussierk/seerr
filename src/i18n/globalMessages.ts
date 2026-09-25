@@ -41,6 +41,8 @@ const globalMessages = defineMessages('i18n', {
   close: 'Close',
   edit: 'Edit',
   areyousure: 'Are you sure?',
+  forceDeleteWarning:
+    'Deleting from {arr} would affect {count, plural, one {# active request} other {# active requests}}. Delete anyway?',
   back: 'Back',
   next: 'Next',
   previous: 'Previous',

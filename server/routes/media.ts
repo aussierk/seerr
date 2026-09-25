@@ -2,9 +2,14 @@ import RadarrAPI from '@server/api/servarr/radarr';
 import SonarrAPI from '@server/api/servarr/sonarr';
 import TautulliAPI from '@server/api/tautulli';
 import TheMovieDb from '@server/api/themoviedb';
-import { MediaStatus, MediaType } from '@server/constants/media';
+import {
+  MediaRequestStatus,
+  MediaStatus,
+  MediaType,
+} from '@server/constants/media';
 import { getRepository } from '@server/datasource';
 import Media from '@server/entity/Media';
+import MediaRequest from '@server/entity/MediaRequest';
 import Season from '@server/entity/Season';
 import { User } from '@server/entity/User';
 import type {
@@ -13,6 +18,7 @@ import type {
 } from '@server/interfaces/api/mediaInterfaces';
 import { Permission } from '@server/lib/permissions';
 import resolveRequestRoute from '@server/lib/resolveRequestRoute';
+import { resolveService, servicesFor } from '@server/lib/serviceDefaults';
 import { getSettings } from '@server/lib/settings';
 import logger from '@server/logger';
 import { isAuthenticated } from '@server/middleware/auth';
@@ -222,12 +228,12 @@ mediaRoutes.delete(
         serverId: specificServiceId,
       });
 
+      const arrName = `${is4k ? '4K ' : ''}${isMovie ? 'Radarr' : 'Sonarr'}`;
       const serviceSettings = (
         isMovie ? settings.radarr : settings.sonarr
       ).find((server) => server.id === targetServerId);
 
       if (!serviceSettings) {
-        const arrName = `${is4k ? '4K ' : ''}${isMovie ? 'Radarr' : 'Sonarr'}`;
         logger.info(
           `There is no default ${arrName} server configured. Did you set any of your ${arrName} servers as default?`,
           {
@@ -238,6 +244,30 @@ mediaRoutes.delete(
         return next({
           status: 409,
           message: `No ${arrName} server configured to delete media files`,
+        });
+      }
+
+      // Deleting from a *arr server that still backs active requests would drop
+      // content those requests depend on, so surface it and require ?force=true.
+      const activeRequests = await getRepository(MediaRequest).find({
+        where: {
+          media: { id: media.id },
+          is4k,
+          status: In([MediaRequestStatus.PENDING, MediaRequestStatus.APPROVED]),
+        },
+      });
+      const affectedRequests = activeRequests.filter(
+        (request) =>
+          // A request whose server is gone is sent to the default one, so that
+          // is the server it depends on
+          resolveService(servicesFor(media.mediaType), is4k, request.serverId)
+            .service?.id === targetServerId
+      ).length;
+
+      if (affectedRequests > 0 && String(req.query.force) !== 'true') {
+        return res.status(409).json({
+          message: `Deleting from ${arrName} would affect ${affectedRequests} active request(s). Pass ?force=true to delete anyway.`,
+          affectedRequests,
         });
       }
 

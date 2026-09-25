@@ -3,6 +3,7 @@ import Badge from '@app/components/Common/Badge';
 import Button from '@app/components/Common/Button';
 import CachedImage from '@app/components/Common/CachedImage';
 import ConfirmButton from '@app/components/Common/ConfirmButton';
+import Modal from '@app/components/Common/Modal';
 import RequestModal from '@app/components/RequestModal';
 import StatusBadge from '@app/components/StatusBadge';
 import useDeepLinks from '@app/hooks/useDeepLinks';
@@ -335,6 +336,8 @@ const RequestItem = ({ request, revalidateList }: RequestItemProps) => {
   const [updatingType, setUpdatingType] = useState<
     'approve' | 'decline' | null
   >(null);
+  const [forceDelete, setForceDelete] = useState<number | null>(null);
+  const [isForcing, setIsForcing] = useState(false);
 
   const modifyRequest = async (type: 'approve' | 'decline') => {
     setUpdatingType(type);
@@ -360,14 +363,29 @@ const RequestItem = ({ request, revalidateList }: RequestItemProps) => {
     mutate('/api/v1/request/count');
   };
 
-  const deleteMediaFile = async () => {
+  const deleteMediaFile = async (force = false) => {
     if (request.media) {
+      if (force) {
+        setIsForcing(true);
+      }
       try {
         await axios.delete(
-          `/api/v1/media/${request.media.id}/file?is4k=${request.is4k}`
+          `/api/v1/media/${request.media.id}/file?is4k=${request.is4k}${
+            force ? '&force=true' : ''
+          }`
         );
       } catch (e) {
+        if (
+          axios.isAxiosError(e) &&
+          e.response?.status === 409 &&
+          typeof e.response.data?.affectedRequests === 'number'
+        ) {
+          setIsForcing(false);
+          setForceDelete(e.response.data.affectedRequests);
+          return;
+        }
         if (!axios.isAxiosError(e) || e.response?.status !== 404) {
+          setIsForcing(false);
           addToast(intl.formatMessage(messages.removemediaerror), {
             autoDismiss: true,
             appearance: 'error',
@@ -376,6 +394,8 @@ const RequestItem = ({ request, revalidateList }: RequestItemProps) => {
           return;
         }
       }
+      setIsForcing(false);
+      setForceDelete(null);
       revalidateList();
     }
   };
@@ -443,6 +463,28 @@ const RequestItem = ({ request, revalidateList }: RequestItemProps) => {
           setShowEditModal(false);
         }}
       />
+      {forceDelete !== null && (
+        <Modal
+          title={intl.formatMessage(messages.removearr, {
+            arr: `${request.is4k ? '4K ' : ''}${
+              request.type === 'movie' ? 'Radarr' : 'Sonarr'
+            }`,
+          })}
+          onCancel={() => setForceDelete(null)}
+          onOk={() => deleteMediaFile(true)}
+          okText={intl.formatMessage(globalMessages.delete)}
+          okButtonType="danger"
+          loading={isForcing}
+          backgroundClickable={!isForcing}
+        >
+          {intl.formatMessage(globalMessages.forceDeleteWarning, {
+            count: forceDelete,
+            arr: `${request.is4k ? '4K ' : ''}${
+              request.type === 'movie' ? 'Radarr' : 'Sonarr'
+            }`,
+          })}
+        </Modal>
+      )}
       <div className="relative flex w-full flex-col justify-between overflow-hidden rounded-xl bg-gray-800 py-2 text-gray-400 shadow-md ring-1 ring-gray-700 xl:h-28 xl:flex-row">
         {title.backdropPath && (
           <div className="absolute inset-0 z-0 w-full bg-cover bg-center xl:w-2/3">
