@@ -2,6 +2,7 @@ import BlocklistBlock from '@app/components/BlocklistBlock';
 import Button from '@app/components/Common/Button';
 import CachedImage from '@app/components/Common/CachedImage';
 import ConfirmButton from '@app/components/Common/ConfirmButton';
+import Modal from '@app/components/Common/Modal';
 import SlideOver from '@app/components/Common/SlideOver';
 import Tooltip from '@app/components/Common/Tooltip';
 import DownloadBlock from '@app/components/DownloadBlock';
@@ -32,6 +33,7 @@ import type { MovieDetails } from '@server/models/Movie';
 import type { TvDetails } from '@server/models/Tv';
 import axios from 'axios';
 import Link from 'next/link';
+import { useState } from 'react';
 import { useIntl } from 'react-intl';
 import useSWR from 'swr';
 
@@ -143,14 +145,38 @@ const ManageSlideOver = ({
     }
   };
 
-  const deleteMediaFile = async (is4k = false) => {
+  const [forceDelete, setForceDelete] = useState<{
+    is4k: boolean;
+    affectedRequests: number;
+  } | null>(null);
+  const [isForcing, setIsForcing] = useState(false);
+
+  const deleteMediaFile = async (is4k = false, force = false) => {
     if (data.mediaInfo) {
+      if (force) {
+        setIsForcing(true);
+      }
       try {
         await axios.delete(
-          `/api/v1/media/${data.mediaInfo.id}/file?is4k=${is4k}`
+          `/api/v1/media/${data.mediaInfo.id}/file?is4k=${is4k}${
+            force ? '&force=true' : ''
+          }`
         );
       } catch (e) {
+        if (
+          axios.isAxiosError(e) &&
+          e.response?.status === 409 &&
+          typeof e.response.data?.affectedRequests === 'number'
+        ) {
+          setIsForcing(false);
+          setForceDelete({
+            is4k,
+            affectedRequests: e.response.data.affectedRequests,
+          });
+          return;
+        }
         if (!axios.isAxiosError(e) || e.response?.status !== 404) {
+          setIsForcing(false);
           addToast(intl.formatMessage(messages.removemediaerror), {
             appearance: 'error',
             autoDismiss: true,
@@ -159,6 +185,8 @@ const ManageSlideOver = ({
           return;
         }
       }
+      setIsForcing(false);
+      setForceDelete(null);
       revalidate();
       onClose();
     }
@@ -745,6 +773,29 @@ const ManageSlideOver = ({
             </div>
           )}
       </div>
+      {forceDelete && (
+        <Modal
+          title={intl.formatMessage(
+            forceDelete.is4k ? messages.removearr4k : messages.removearr,
+            {
+              arr: mediaType === 'movie' ? 'Radarr' : 'Sonarr',
+            }
+          )}
+          onCancel={() => setForceDelete(null)}
+          onOk={() => deleteMediaFile(forceDelete.is4k, true)}
+          okText={intl.formatMessage(globalMessages.delete)}
+          okButtonType="danger"
+          loading={isForcing}
+          backgroundClickable={!isForcing}
+        >
+          {intl.formatMessage(globalMessages.forceDeleteWarning, {
+            count: forceDelete.affectedRequests,
+            arr: `${forceDelete.is4k ? '4K ' : ''}${
+              mediaType === 'movie' ? 'Radarr' : 'Sonarr'
+            }`,
+          })}
+        </Modal>
+      )}
     </SlideOver>
   );
 };
