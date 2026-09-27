@@ -2,6 +2,19 @@ import ExternalAPI from '@server/api/externalapi';
 import type { AvailableCacheIds } from '@server/lib/cache';
 import cacheManager from '@server/lib/cache';
 import { getSettings, type DVRSettings } from '@server/lib/settings';
+import { isEqual } from 'lodash';
+
+export function mergeTags(
+  existingTags: number[],
+  incomingTags?: number[]
+): { tags: number[]; changed: boolean } {
+  if (!incomingTags) {
+    return { tags: existingTags, changed: false };
+  }
+  const merged = Array.from(new Set([...existingTags, ...incomingTags]));
+  const changed = !isEqual(new Set(merged), new Set(existingTags));
+  return { tags: merged, changed };
+}
 
 export interface SystemStatus {
   version: string;

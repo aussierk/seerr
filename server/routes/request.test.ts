@@ -1076,6 +1076,55 @@ describe('POST /request/:requestId/:status', () => {
     const persisted = await repo.findOneOrFail({ where: { id: declined.id } });
     assert.strictEqual(persisted.status, MediaRequestStatus.DECLINED);
   });
+
+  it('keeps movie status while another active request remains on decline', async () => {
+    const userRepo = getRepository(User);
+    const mediaRepo = getRepository(Media);
+    const requestRepo = getRepository(MediaRequest);
+    const admin = await loginAs('admin@seerr.dev', 'test1234');
+
+    const requestedBy = await userRepo.findOneOrFail({
+      where: { email: 'demo@seerr.dev' },
+    });
+    const media = await mediaRepo.save(
+      new Media({
+        mediaType: MediaType.MOVIE,
+        tmdbId: 12399,
+        status: MediaStatus.PENDING,
+        status4k: MediaStatus.UNKNOWN,
+      })
+    );
+    const first = await requestRepo.save(
+      new MediaRequest({
+        type: MediaType.MOVIE,
+        status: MediaRequestStatus.PENDING,
+        media,
+        requestedBy,
+        is4k: false,
+      })
+    );
+    const second = await requestRepo.save(
+      new MediaRequest({
+        type: MediaType.MOVIE,
+        status: MediaRequestStatus.PENDING,
+        media,
+        requestedBy,
+        is4k: false,
+      })
+    );
+
+    const res = await admin.post(`/request/${first.id}/decline`);
+    assert.strictEqual(res.status, 200);
+
+    let updated = await mediaRepo.findOneOrFail({ where: { id: media.id } });
+    assert.strictEqual(updated.status, MediaStatus.PENDING);
+
+    const res2 = await admin.post(`/request/${second.id}/decline`);
+    assert.strictEqual(res2.status, 200);
+
+    updated = await mediaRepo.findOneOrFail({ where: { id: media.id } });
+    assert.strictEqual(updated.status, MediaStatus.UNKNOWN);
+  });
 });
 
 describe('POST /request/:requestId/retry', () => {

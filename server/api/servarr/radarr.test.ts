@@ -93,6 +93,42 @@ describe('RadarrAPI removeMovie', () => {
   });
 });
 
+describe('RadarrAPI addTags', () => {
+  afterEach(() => mock.restoreAll());
+
+  it('adds new tags to the existing movie through the editor', async () => {
+    const radarr = buildRadarr();
+    mock.method(getAxios(radarr), 'get', async () => ({
+      data: { id: 7, title: 'Test Movie', tags: [1] },
+    }));
+    const put = mock.method(getAxios(radarr), 'put', async () => ({
+      data: { id: 7, title: 'Test Movie', tags: [1, 2] },
+    }));
+
+    await radarr.addTags(7, [2]);
+
+    assert.strictEqual(put.mock.callCount(), 1);
+    assert.strictEqual(put.mock.calls[0].arguments[0], '/movie/editor');
+    assert.deepStrictEqual(put.mock.calls[0].arguments[1], {
+      movieIds: [7],
+      tags: [2],
+      applyTags: 'add',
+    });
+  });
+
+  it('does not save when all tags are already present on the movie', async () => {
+    const radarr = buildRadarr();
+    mock.method(getAxios(radarr), 'get', async () => ({
+      data: { id: 7, title: 'Test Movie', tags: [1, 2] },
+    }));
+    const put = mock.method(getAxios(radarr), 'put', async () => ({}));
+
+    await radarr.addTags(7, [2]);
+
+    assert.strictEqual(put.mock.callCount(), 0);
+  });
+});
+
 describe('RadarrAPI getMovieByTmdbId', () => {
   afterEach(() => mock.restoreAll());
 

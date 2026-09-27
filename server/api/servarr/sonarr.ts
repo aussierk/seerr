@@ -1,6 +1,6 @@
 import logger from '@server/logger';
 import type { AxiosResponse } from 'axios';
-import ServarrBase from './base';
+import ServarrBase, { mergeTags } from './base';
 
 export interface SonarrSeason {
   seasonNumber: number;
@@ -329,6 +329,32 @@ class SonarrAPI extends ServarrBase<{
       });
       throw new Error('Failed to add series', { cause: e });
     }
+  }
+
+  public async addTags(
+    seriesId: number,
+    tags: number[],
+    series?: SonarrSeries
+  ): Promise<void> {
+    const existingSeries = series ?? (await this.getSeriesById(seriesId));
+    const { changed } = mergeTags(existingSeries.tags, tags);
+
+    if (!changed) {
+      return;
+    }
+
+    // The editor adds to the tags Sonarr holds, so a concurrent change to the
+    // series is not overwritten the way saving a whole copy of it would be
+    await this.axios.put('/series/editor', {
+      seriesIds: [seriesId],
+      tags,
+      applyTags: 'add',
+    });
+    logger.info('Merged requester tag into existing series in Sonarr.', {
+      label: 'Sonarr',
+      seriesId: existingSeries.id,
+      seriesTitle: existingSeries.title,
+    });
   }
 
   public async getLanguageProfiles(): Promise<LanguageProfile[]> {

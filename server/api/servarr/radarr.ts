@@ -1,7 +1,6 @@
 import logger from '@server/logger';
 import type { AxiosResponse } from 'axios';
-import { isEqual } from 'lodash';
-import ServarrBase from './base';
+import ServarrBase, { mergeTags } from './base';
 
 export interface RadarrMovieOptions {
   title: string;
@@ -152,7 +151,7 @@ class RadarrAPI extends ServarrBase<{ movieId: number }> {
       const movie = await this.getMovieByTmdbId(options.tmdbId);
 
       if (movie.hasFile) {
-        const { tags: mergedTags, changed } = this.mergeTags(
+        const { tags: mergedTags, changed } = mergeTags(
           movie.tags,
           options.tags
         );
@@ -234,7 +233,7 @@ class RadarrAPI extends ServarrBase<{ movieId: number }> {
 
       if (movie.id) {
         // Movie exists and is already monitored
-        const { tags: mergedTags, changed: tagsChanged } = this.mergeTags(
+        const { tags: mergedTags, changed: tagsChanged } = mergeTags(
           movie.tags,
           options.tags
         );
@@ -318,16 +317,20 @@ class RadarrAPI extends ServarrBase<{ movieId: number }> {
     }
   };
 
-  private mergeTags(
-    existingTags: number[],
-    incomingTags?: number[]
-  ): { tags: number[]; changed: boolean } {
-    if (!incomingTags) {
-      return { tags: existingTags, changed: false };
+  public async addTags(movieId: number, tags: number[]): Promise<void> {
+    const movie = await this.getMovie({ id: movieId });
+    const { changed } = mergeTags(movie.tags, tags);
+
+    if (!changed) {
+      return;
     }
-    const merged = Array.from(new Set([...existingTags, ...incomingTags]));
-    const changed = !isEqual(new Set(merged), new Set(existingTags));
-    return { tags: merged, changed };
+
+    await this.addTagsToMovie(movieId, tags);
+    logger.info('Merged requester tag into existing movie in Radarr.', {
+      label: 'Radarr',
+      movieId: movie.id,
+      movieTitle: movie.title,
+    });
   }
 
   public async searchMovie(movieId: number): Promise<void> {
