@@ -17,6 +17,7 @@ import type SeasonRequest from '@server/entity/SeasonRequest';
 import type { NonFunctionProperties } from '@server/interfaces/api/common';
 import type { QuotaResponse } from '@server/interfaces/api/userInterfaces';
 import { Permission } from '@server/lib/permissions';
+import { getOwnBlockedSeasons } from '@server/lib/requestSeasons';
 import type { TvDetails } from '@server/models/Tv';
 import axios from 'axios';
 import { useState } from 'react';
@@ -216,7 +217,7 @@ const TvRequestModal = ({
           seasons: settings.currentSettings.partialRequestsEnabled
             ? selectedSeasons.sort((a, b) => a - b)
             : getAllSeasons().filter(
-                (season) => !getAllRequestedSeasons().includes(season)
+                (season) => !getMyRequestedSeasons().includes(season)
               ),
           ...overrideParams,
         }
@@ -265,43 +266,21 @@ const TvRequestModal = ({
     return allSeasons.map((season) => season.seasonNumber);
   };
 
-  const getAllRequestedSeasons = (): number[] => {
-    const requestedSeasons = (data?.mediaInfo?.requests ?? [])
-      .filter(
-        (request) =>
-          request.is4k === is4k &&
-          request.status !== MediaRequestStatus.DECLINED &&
-          request.status !== MediaRequestStatus.COMPLETED
-      )
-      .reduce((requestedSeasons, request) => {
-        return [
-          ...requestedSeasons,
-          ...request.seasons
-            .filter((season) => !editingSeasons.includes(season.seasonNumber))
-            .map((sr) => sr.seasonNumber),
-        ];
-      }, [] as number[]);
-
-    const availableSeasons = (data?.mediaInfo?.seasons ?? [])
-      .filter(
-        (season) =>
-          (season[is4k ? 'status4k' : 'status'] === MediaStatus.AVAILABLE ||
-            season[is4k ? 'status4k' : 'status'] ===
-              MediaStatus.PARTIALLY_AVAILABLE ||
-            season[is4k ? 'status4k' : 'status'] === MediaStatus.PROCESSING) &&
-          !requestedSeasons.includes(season.seasonNumber)
-      )
-      .map((season) => season.seasonNumber);
-
-    return [...requestedSeasons, ...availableSeasons];
-  };
+  const getMyRequestedSeasons = (): number[] =>
+    getOwnBlockedSeasons({
+      requests: data?.mediaInfo?.requests ?? [],
+      seasons: data?.mediaInfo?.seasons ?? [],
+      userId: user?.id,
+      is4k,
+      ignoreRequestId: editRequest?.id,
+    });
 
   const isSelectedSeason = (seasonNumber: number): boolean =>
     selectedSeasons.includes(seasonNumber);
 
   const toggleSeason = (seasonNumber: number): void => {
-    // If this season already has a pending request, don't allow it to be toggled
-    if (getAllRequestedSeasons().includes(seasonNumber)) {
+    // Seasons the current user already has a pending request for can't be toggled
+    if (getMyRequestedSeasons().includes(seasonNumber)) {
       return;
     }
 
@@ -323,8 +302,9 @@ const TvRequestModal = ({
     }
   };
 
+  const myRequestedSeasons = getMyRequestedSeasons();
   const unrequestedSeasons = getAllSeasons().filter(
-    (season) => !getAllRequestedSeasons().includes(season)
+    (season) => !myRequestedSeasons.includes(season)
   );
 
   const toggleAllSeasons = (): void => {
@@ -354,7 +334,7 @@ const TvRequestModal = ({
     return (
       selectedSeasons.filter((season) => season !== 0).length ===
       getAllSeasons().filter(
-        (season) => !getAllRequestedSeasons().includes(season) && season !== 0
+        (season) => !getMyRequestedSeasons().includes(season) && season !== 0
       ).length
     );
   };
@@ -504,7 +484,7 @@ const TvRequestModal = ({
           !settings.currentSettings.partialRequestsEnabled &&
           unrequestedSeasons.length > (quota?.tv.remaining ?? 0)
         ) &&
-        getAllRequestedSeasons().length < getAllSeasons().length &&
+        getMyRequestedSeasons().length < getAllSeasons().length &&
         !editRequest && (
           <div className="mt-6">
             <Alert
@@ -612,6 +592,9 @@ const TvRequestModal = ({
                           sn[is4k ? 'status4k' : 'status'] !==
                             MediaStatus.DELETED
                       );
+                      const isMyRequested = myRequestedSeasons.includes(
+                        season.seasonNumber
+                      );
                       return (
                         <tr key={`season-${season.id}`}>
                           <td
@@ -624,11 +607,7 @@ const TvRequestModal = ({
                               role="checkbox"
                               tabIndex={0}
                               aria-checked={
-                                !!mediaSeason ||
-                                (!!seasonRequest &&
-                                  !editingSeasons.includes(
-                                    season.seasonNumber
-                                  )) ||
+                                isMyRequested ||
                                 isSelectedSeason(season.seasonNumber)
                               }
                               onClick={() => toggleSeason(season.seasonNumber)}
@@ -638,12 +617,10 @@ const TvRequestModal = ({
                                 }
                               }}
                               className={`relative inline-flex h-5 w-10 flex-shrink-0 cursor-pointer items-center justify-center pt-2 focus:outline-none ${
-                                mediaSeason ||
+                                isMyRequested ||
                                 (quota?.tv.limit &&
                                   currentlyRemaining <= 0 &&
-                                  !isSelectedSeason(season.seasonNumber)) ||
-                                (!!seasonRequest &&
-                                  !editingSeasons.includes(season.seasonNumber))
+                                  !isSelectedSeason(season.seasonNumber))
                                   ? 'opacity-50'
                                   : ''
                               }`}
@@ -651,11 +628,7 @@ const TvRequestModal = ({
                               <span
                                 aria-hidden="true"
                                 className={`${
-                                  !!mediaSeason ||
-                                  (!!seasonRequest &&
-                                    !editingSeasons.includes(
-                                      season.seasonNumber
-                                    )) ||
+                                  isMyRequested ||
                                   isSelectedSeason(season.seasonNumber)
                                     ? 'bg-indigo-500'
                                     : 'bg-gray-700'
@@ -664,11 +637,7 @@ const TvRequestModal = ({
                               <span
                                 aria-hidden="true"
                                 className={`${
-                                  !!mediaSeason ||
-                                  (!!seasonRequest &&
-                                    !editingSeasons.includes(
-                                      season.seasonNumber
-                                    )) ||
+                                  isMyRequested ||
                                   isSelectedSeason(season.seasonNumber)
                                     ? 'translate-x-5'
                                     : 'translate-x-0'

@@ -13,6 +13,7 @@ import {
 import { MediaRequestStatus, MediaStatus } from '@server/constants/media';
 import type Media from '@server/entity/Media';
 import type { MediaRequest } from '@server/entity/MediaRequest';
+import { hasOwnMovieRequest } from '@server/lib/ownMovieRequest';
 import axios from 'axios';
 import { useMemo, useState } from 'react';
 import { useIntl } from 'react-intl';
@@ -121,6 +122,17 @@ const RequestButton = ({
     onUpdate();
     mutate('/api/v1/request/count');
   };
+
+  // A user can hold one request per movie, so only others may request it again.
+  // Series are handled by the modal, which skips the seasons already held.
+  const holdsMovieRequest = (is4k: boolean) =>
+    mediaType === 'movie' &&
+    hasOwnMovieRequest({
+      requests: media?.requests ?? [],
+      mediaStatus: media?.[is4k ? 'status4k' : 'status'],
+      userId: user?.id,
+      is4k,
+    });
 
   const buttons: ButtonOption[] = [];
 
@@ -271,7 +283,14 @@ const RequestButton = ({
   if (
     (!media ||
       media.status === MediaStatus.UNKNOWN ||
-      (media.status === MediaStatus.DELETED && !activeRequest)) &&
+      media.status === MediaStatus.DELETED ||
+      media.status === MediaStatus.PENDING ||
+      media.status === MediaStatus.AVAILABLE ||
+      media.status === MediaStatus.PARTIALLY_AVAILABLE ||
+      media.status === MediaStatus.PROCESSING) &&
+    (!activeRequest || activeRequest.requestedBy.id !== user?.id) &&
+    !holdsMovieRequest(false) &&
+    !isShowComplete &&
     hasPermission(
       [
         Permission.REQUEST,
@@ -316,7 +335,14 @@ const RequestButton = ({
   if (
     (!media ||
       media.status4k === MediaStatus.UNKNOWN ||
-      (media.status4k === MediaStatus.DELETED && !active4kRequest)) &&
+      media.status4k === MediaStatus.DELETED ||
+      media.status4k === MediaStatus.PENDING ||
+      media.status4k === MediaStatus.AVAILABLE ||
+      media.status4k === MediaStatus.PARTIALLY_AVAILABLE ||
+      media.status4k === MediaStatus.PROCESSING) &&
+    (!active4kRequest || active4kRequest.requestedBy.id !== user?.id) &&
+    !holdsMovieRequest(true) &&
+    !is4kShowComplete &&
     hasPermission(
       [
         Permission.REQUEST_4K,

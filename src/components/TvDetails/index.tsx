@@ -61,6 +61,7 @@ import {
   MediaType,
 } from '@server/constants/media';
 import { MediaServerType, ServerType } from '@server/constants/server';
+import { getOwnBlockedSeasons } from '@server/lib/requestSeasons';
 import type { TvDetails as TvDetailsType } from '@server/models/Tv';
 import type { Crew } from '@server/models/common';
 import axios from 'axios';
@@ -292,34 +293,15 @@ const TvDetails = ({ tv }: TvDetailsProps) => {
     );
   }
 
-  const getAllRequestedSeasons = (is4k: boolean): number[] => {
-    const requestedSeasons = (data?.mediaInfo?.requests ?? [])
-      .filter(
-        (request) =>
-          request.is4k === is4k &&
-          request.status !== MediaRequestStatus.DECLINED &&
-          request.status !== MediaRequestStatus.COMPLETED
-      )
-      .reduce((requestedSeasons, request) => {
-        return [
-          ...requestedSeasons,
-          ...request.seasons.map((sr) => sr.seasonNumber),
-        ];
-      }, [] as number[]);
-
-    const availableSeasons = (data?.mediaInfo?.seasons ?? [])
-      .filter(
-        (season) =>
-          (season[is4k ? 'status4k' : 'status'] === MediaStatus.AVAILABLE ||
-            season[is4k ? 'status4k' : 'status'] ===
-              MediaStatus.PARTIALLY_AVAILABLE ||
-            season[is4k ? 'status4k' : 'status'] === MediaStatus.PROCESSING) &&
-          !requestedSeasons.includes(season.seasonNumber)
-      )
-      .map((season) => season.seasonNumber);
-
-    return [...requestedSeasons, ...availableSeasons];
-  };
+  // Seasons the current user already holds, so another user's request or
+  // availability doesn't hide the request button.
+  const getAllRequestedSeasons = (is4k: boolean): number[] =>
+    getOwnBlockedSeasons({
+      requests: data?.mediaInfo?.requests ?? [],
+      seasons: data?.mediaInfo?.seasons ?? [],
+      userId: user?.id,
+      is4k,
+    });
 
   // Mirrors the season list the request modal offers, so the two agree.
   const requestableSeasons = data.seasons
