@@ -12,6 +12,7 @@ import defineMessages from '@app/utils/defineMessages';
 import { MediaRequestStatus, MediaStatus } from '@server/constants/media';
 import type { MediaRequest } from '@server/entity/MediaRequest';
 import type { QuotaResponse } from '@server/interfaces/api/userInterfaces';
+import { hasOwnMovieRequest } from '@server/lib/ownMovieRequest';
 import { Permission } from '@server/lib/permissions';
 import type { Collection } from '@server/models/Collection';
 import axios from 'axios';
@@ -72,38 +73,38 @@ const CollectionRequestModal = ({
       .map((part) => part.id);
   };
 
-  const getAllRequestedParts = (): number[] => {
-    const requestedParts = (data?.parts ?? []).reduce(
-      (requestedParts, part) => {
-        return [
-          ...requestedParts,
-          ...(part.mediaInfo?.requests ?? [])
-            .filter(
-              (request) =>
-                request.is4k === is4k &&
-                request.status !== MediaRequestStatus.DECLINED &&
-                request.status !== MediaRequestStatus.COMPLETED
-            )
-            .map((part) => part.id),
-        ];
-      },
-      [] as number[]
+  const ownerId = requestOverrides?.user?.id ?? user?.id;
+
+  const isActiveRequest = (request: MediaRequest): boolean =>
+    request.is4k === is4k &&
+    request.status !== MediaRequestStatus.DECLINED &&
+    request.status !== MediaRequestStatus.COMPLETED;
+
+  // Locked when the owner holds it, or it is in the library with no request
+  const isPartLocked = (part: Collection['parts'][number]): boolean => {
+    const mediaInfo = part.mediaInfo;
+    if (!mediaInfo) {
+      return false;
+    }
+
+    const requests = mediaInfo.requests ?? [];
+    const status = mediaInfo[is4k ? 'status4k' : 'status'];
+
+    return (
+      hasOwnMovieRequest({
+        requests,
+        mediaStatus: status,
+        userId: ownerId,
+        is4k,
+      }) ||
+      ((status === MediaStatus.AVAILABLE ||
+        status === MediaStatus.PROCESSING) &&
+        !requests.some(isActiveRequest))
     );
-
-    const availableParts = (data?.parts ?? [])
-      .filter(
-        (part) =>
-          part.mediaInfo &&
-          (part.mediaInfo[is4k ? 'status4k' : 'status'] ===
-            MediaStatus.AVAILABLE ||
-            part.mediaInfo[is4k ? 'status4k' : 'status'] ===
-              MediaStatus.PROCESSING) &&
-          !requestedParts.includes(part.id)
-      )
-      .map((part) => part.id);
-
-    return [...requestedParts, ...availableParts];
   };
+
+  const getAllRequestedParts = (): number[] =>
+    (data?.parts ?? []).filter(isPartLocked).map((part) => part.id);
 
   const isSelectedPart = (tmdbId: number): boolean =>
     selectedParts.includes(tmdbId);
@@ -171,9 +172,7 @@ const CollectionRequestModal = ({
 
     return (part?.mediaInfo?.requests ?? []).find(
       (request) =>
-        request.is4k === is4k &&
-        request.status !== MediaRequestStatus.DECLINED &&
-        request.status !== MediaRequestStatus.COMPLETED
+        isActiveRequest(request) && request.requestedBy.id === ownerId
     );
   };
 
@@ -389,10 +388,7 @@ const CollectionRequestModal = ({
                               role="checkbox"
                               tabIndex={0}
                               aria-checked={
-                                (!!partMedia &&
-                                  partMedia.status !==
-                                    MediaStatus.BLOCKLISTED) ||
-                                isSelectedPart(part.id)
+                                isPartLocked(part) || isSelectedPart(part.id)
                               }
                               onClick={() => togglePart(part.id)}
                               onKeyDown={(e) => {
@@ -401,9 +397,7 @@ const CollectionRequestModal = ({
                                 }
                               }}
                               className={`relative inline-flex h-5 w-10 flex-shrink-0 cursor-pointer items-center justify-center pt-2 focus:outline-none ${
-                                (!!partMedia &&
-                                  partMedia.status !==
-                                    MediaStatus.BLOCKLISTED) ||
+                                isPartLocked(part) ||
                                 partRequest ||
                                 (quota?.movie.limit &&
                                   currentlyRemaining <= 0 &&
@@ -415,9 +409,7 @@ const CollectionRequestModal = ({
                               <span
                                 aria-hidden="true"
                                 className={`${
-                                  (!!partMedia &&
-                                    partMedia.status !==
-                                      MediaStatus.BLOCKLISTED) ||
+                                  isPartLocked(part) ||
                                   partRequest ||
                                   isSelectedPart(part.id)
                                     ? 'bg-indigo-500'
@@ -427,9 +419,7 @@ const CollectionRequestModal = ({
                               <span
                                 aria-hidden="true"
                                 className={`${
-                                  (!!partMedia &&
-                                    partMedia.status !==
-                                      MediaStatus.BLOCKLISTED) ||
+                                  isPartLocked(part) ||
                                   partRequest ||
                                   isSelectedPart(part.id)
                                     ? 'translate-x-5'
