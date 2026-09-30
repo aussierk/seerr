@@ -9,6 +9,7 @@ import useToasts from '@app/hooks/useToasts';
 import { useUser } from '@app/hooks/useUser';
 import globalMessages from '@app/i18n/globalMessages';
 import defineMessages from '@app/utils/defineMessages';
+import { hasAutoApprovePermission } from '@app/utils/requestPermissionHelpers';
 import { MediaRequestStatus, MediaStatus } from '@server/constants/media';
 import type { MediaRequest } from '@server/entity/MediaRequest';
 import type { QuotaResponse } from '@server/interfaces/api/userInterfaces';
@@ -212,11 +213,17 @@ const CollectionRequestModal = ({
       );
 
       if (onComplete) {
+        const requestAutoApproved = hasAutoApprovePermission(
+          hasPermission,
+          'movie',
+          is4k
+        );
         onComplete(
           selectedParts.length === (data?.parts ?? []).length
             ? MediaStatus.UNKNOWN
             : MediaStatus.PARTIALLY_AVAILABLE,
-          !requestOverrides?.user || requestOverrides.user.id === user?.id
+          (!requestOverrides?.user || requestOverrides.user.id === user?.id) &&
+            requestAutoApproved
         );
         mutate('/api/v1/request/count');
       }
@@ -248,16 +255,10 @@ const CollectionRequestModal = ({
     selectedParts,
     is4k,
     user?.id,
+    hasPermission,
   ]);
 
-  const hasAutoApprove = hasPermission(
-    [
-      Permission.MANAGE_REQUESTS,
-      is4k ? Permission.AUTO_APPROVE_4K : Permission.AUTO_APPROVE,
-      is4k ? Permission.AUTO_APPROVE_4K_MOVIE : Permission.AUTO_APPROVE_MOVIE,
-    ],
-    { type: 'or' }
-  );
+  const hasAutoApprove = hasAutoApprovePermission(hasPermission, 'movie', is4k);
 
   const blocklistVisibility = hasPermission(
     [Permission.MANAGE_BLOCKLIST, Permission.VIEW_BLOCKLIST],

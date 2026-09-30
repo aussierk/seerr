@@ -7,6 +7,7 @@ import useToasts from '@app/hooks/useToasts';
 import { useUser } from '@app/hooks/useUser';
 import globalMessages from '@app/i18n/globalMessages';
 import defineMessages from '@app/utils/defineMessages';
+import { hasAutoApprovePermission } from '@app/utils/requestPermissionHelpers';
 import { MediaStatus } from '@server/constants/media';
 import type { MediaRequest } from '@server/entity/MediaRequest';
 import type { NonFunctionProperties } from '@server/interfaces/api/common';
@@ -102,18 +103,16 @@ const MovieRequestModal = ({
 
       if (response.data) {
         if (onComplete) {
+          const requestAutoApproved = hasAutoApprovePermission(
+            hasPermission,
+            'movie',
+            is4k
+          );
           onComplete(
-            hasPermission(
-              is4k ? Permission.AUTO_APPROVE_4K : Permission.AUTO_APPROVE
-            ) ||
-              hasPermission(
-                is4k
-                  ? Permission.AUTO_APPROVE_4K_MOVIE
-                  : Permission.AUTO_APPROVE_MOVIE
-              )
-              ? MediaStatus.PROCESSING
-              : MediaStatus.PENDING,
-            !requestOverrides?.user || requestOverrides.user.id === user?.id
+            requestAutoApproved ? MediaStatus.PROCESSING : MediaStatus.PENDING,
+            (!requestOverrides?.user ||
+              requestOverrides.user.id === user?.id) &&
+              requestAutoApproved
           );
         }
         addToast(
@@ -312,14 +311,7 @@ const MovieRequestModal = ({
     );
   }
 
-  const hasAutoApprove = hasPermission(
-    [
-      Permission.MANAGE_REQUESTS,
-      is4k ? Permission.AUTO_APPROVE_4K : Permission.AUTO_APPROVE,
-      is4k ? Permission.AUTO_APPROVE_4K_MOVIE : Permission.AUTO_APPROVE_MOVIE,
-    ],
-    { type: 'or' }
-  );
+  const hasAutoApprove = hasAutoApprovePermission(hasPermission, 'movie', is4k);
 
   return (
     <Modal
