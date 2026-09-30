@@ -10,6 +10,7 @@ import useToasts from '@app/hooks/useToasts';
 import { useUser } from '@app/hooks/useUser';
 import globalMessages from '@app/i18n/globalMessages';
 import defineMessages from '@app/utils/defineMessages';
+import { hasAutoApprovePermission } from '@app/utils/requestPermissionHelpers';
 import { ANIME_KEYWORD_ID } from '@server/api/themoviedb/constants';
 import { MediaRequestStatus, MediaStatus } from '@server/constants/media';
 import type { MediaRequest } from '@server/entity/MediaRequest';
@@ -211,9 +212,16 @@ const TvRequestModal = ({
 
       if (response.data) {
         if (onComplete) {
+          const requestAutoApproved = hasAutoApprovePermission(
+            hasPermission,
+            'tv',
+            is4k
+          );
           onComplete(
             response.data.media.status,
-            !requestOverrides?.user || requestOverrides.user.id === user?.id
+            (!requestOverrides?.user ||
+              requestOverrides.user.id === user?.id) &&
+              requestAutoApproved
           );
         }
         addToast(
@@ -474,14 +482,7 @@ const TvRequestModal = ({
               username: editRequest?.requestedBy.displayName,
             })
         : null}
-      {hasPermission(
-        [
-          Permission.MANAGE_REQUESTS,
-          is4k ? Permission.AUTO_APPROVE_4K : Permission.AUTO_APPROVE,
-          is4k ? Permission.AUTO_APPROVE_4K_TV : Permission.AUTO_APPROVE_TV,
-        ],
-        { type: 'or' }
-      ) &&
+      {hasAutoApprovePermission(hasPermission, 'tv', is4k) &&
         !(
           quota?.tv.limit &&
           !settings.currentSettings.partialRequestsEnabled &&
