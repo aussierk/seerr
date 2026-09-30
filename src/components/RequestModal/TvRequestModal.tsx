@@ -157,11 +157,18 @@ const TvRequestModal = ({
       if (onComplete) {
         onComplete(MediaStatus.PENDING);
       }
-    } catch {
-      addToast(<span>{intl.formatMessage(messages.errorediting)}</span>, {
-        appearance: 'error',
-        autoDismiss: true,
-      });
+    } catch (e) {
+      addToast(
+        <span>
+          {axios.isAxiosError(e) && e.response?.data?.message
+            ? e.response.data.message
+            : intl.formatMessage(messages.errorediting)}
+        </span>,
+        {
+          appearance: 'error',
+          autoDismiss: true,
+        }
+      );
     } finally {
       if (onUpdating) {
         onUpdating(false);
@@ -194,22 +201,25 @@ const TvRequestModal = ({
           tags: requestOverrides.tags,
         };
       }
-      const response = await axios.post<MediaRequest>('/api/v1/request', {
-        mediaId: data?.id,
-        tvdbId: tvdbId ?? data?.externalIds.tvdbId,
-        mediaType: 'tv',
-        is4k,
-        ignoreQuota: requestOverrides?.ignoreQuota,
-        seasons: settings.currentSettings.partialRequestsEnabled
-          ? selectedSeasons.sort((a, b) => a - b)
-          : getAllSeasons().filter(
-              (season) => !getAllRequestedSeasons().includes(season)
-            ),
-        ...overrideParams,
-      });
+      const response = await axios.post<MediaRequest | { message: string }>(
+        '/api/v1/request',
+        {
+          mediaId: data?.id,
+          tvdbId: tvdbId ?? data?.externalIds.tvdbId,
+          mediaType: 'tv',
+          is4k,
+          ignoreQuota: requestOverrides?.ignoreQuota,
+          seasons: settings.currentSettings.partialRequestsEnabled
+            ? selectedSeasons.sort((a, b) => a - b)
+            : getAllSeasons().filter(
+                (season) => !getAllRequestedSeasons().includes(season)
+              ),
+          ...overrideParams,
+        }
+      );
       mutate('/api/v1/request?filter=all&take=10&sort=modified&skip=0');
 
-      if (response.data) {
+      if (response.data && 'media' in response.data) {
         if (onComplete) {
           onComplete(response.data.media.status);
         }
@@ -222,12 +232,23 @@ const TvRequestModal = ({
           </span>,
           { appearance: 'success', autoDismiss: true }
         );
+      } else if (response.data) {
+        // 202: every requested season is already covered, nothing new to request
+        addToast(response.data.message, {
+          appearance: 'info',
+          autoDismiss: true,
+        });
       }
-    } catch {
-      addToast(intl.formatMessage(messages.requesterror), {
-        appearance: 'error',
-        autoDismiss: true,
-      });
+    } catch (e) {
+      addToast(
+        axios.isAxiosError(e) && e.response?.data?.message
+          ? e.response.data.message
+          : intl.formatMessage(messages.requesterror),
+        {
+          appearance: 'error',
+          autoDismiss: true,
+        }
+      );
     } finally {
       if (onUpdating) {
         onUpdating(false);
