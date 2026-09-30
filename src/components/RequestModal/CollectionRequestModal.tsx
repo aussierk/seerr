@@ -35,7 +35,7 @@ interface RequestModalProps extends React.HTMLAttributes<HTMLDivElement> {
   tmdbId: number;
   is4k?: boolean;
   onCancel?: () => void;
-  onComplete?: (newStatus: MediaStatus) => void;
+  onComplete?: (newStatus: MediaStatus, requestedByUser?: boolean) => void;
   onUpdating?: (isUpdating: boolean) => void;
 }
 
@@ -215,7 +215,8 @@ const CollectionRequestModal = ({
         onComplete(
           selectedParts.length === (data?.parts ?? []).length
             ? MediaStatus.UNKNOWN
-            : MediaStatus.PARTIALLY_AVAILABLE
+            : MediaStatus.PARTIALLY_AVAILABLE,
+          !requestOverrides?.user || requestOverrides.user.id === user?.id
         );
         mutate('/api/v1/request/count');
       }
@@ -246,6 +247,7 @@ const CollectionRequestModal = ({
     intl,
     selectedParts,
     is4k,
+    user?.id,
   ]);
 
   const hasAutoApprove = hasPermission(
