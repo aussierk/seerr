@@ -42,7 +42,7 @@ interface RequestModalProps extends React.HTMLAttributes<HTMLDivElement> {
   is4k?: boolean;
   editRequest?: NonFunctionProperties<MediaRequest>;
   onCancel?: () => void;
-  onComplete?: (newStatus: MediaStatus) => void;
+  onComplete?: (newStatus: MediaStatus, requestedByUser?: boolean) => void;
   onUpdating?: (isUpdating: boolean) => void;
 }
 
@@ -112,7 +112,8 @@ const MovieRequestModal = ({
                   : Permission.AUTO_APPROVE_MOVIE
               )
               ? MediaStatus.PROCESSING
-              : MediaStatus.PENDING
+              : MediaStatus.PENDING,
+            !requestOverrides?.user || requestOverrides.user.id === user?.id
           );
         }
         addToast(
@@ -142,6 +143,7 @@ const MovieRequestModal = ({
     addToast,
     intl,
     hasPermission,
+    user?.id,
   ]);
 
   const cancelRequest = async () => {
