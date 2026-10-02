@@ -357,6 +357,41 @@ class SonarrAPI extends ServarrBase<{
     });
   }
 
+  public async updateSeriesSettings(
+    seriesId: number,
+    settings: {
+      qualityProfileId?: number | null;
+      languageProfileId?: number | null;
+      rootFolderPath?: string | null;
+    }
+  ): Promise<void> {
+    const payload: Record<string, unknown> = { seriesIds: [seriesId] };
+
+    if (settings.qualityProfileId != null) {
+      payload.qualityProfileId = settings.qualityProfileId;
+    }
+    if (settings.languageProfileId != null) {
+      payload.languageProfileId = settings.languageProfileId;
+    }
+    if (settings.rootFolderPath) {
+      payload.rootFolderPath = settings.rootFolderPath;
+      payload.moveFiles = true;
+    }
+    if (Object.keys(payload).length === 1) {
+      return;
+    }
+
+    await this.axios.put('/series/editor', payload);
+    logger.info(
+      'Updated quality profile and root folder of series in Sonarr.',
+      {
+        label: 'Sonarr',
+        seriesId,
+        ...settings,
+      }
+    );
+  }
+
   public async getLanguageProfiles(): Promise<LanguageProfile[]> {
     try {
       const data = await this.getRolling<LanguageProfile[]>(
