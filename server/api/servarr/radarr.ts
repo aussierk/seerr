@@ -360,6 +360,34 @@ class RadarrAPI extends ServarrBase<{ movieId: number }> {
     });
   }
 
+  public async updateMovieSettings(
+    movieId: number,
+    settings: {
+      qualityProfileId?: number | null;
+      rootFolderPath?: string | null;
+    }
+  ): Promise<void> {
+    const payload: Record<string, unknown> = { movieIds: [movieId] };
+
+    if (settings.qualityProfileId != null) {
+      payload.qualityProfileId = settings.qualityProfileId;
+    }
+    if (settings.rootFolderPath) {
+      payload.rootFolderPath = settings.rootFolderPath;
+      payload.moveFiles = true;
+    }
+    if (Object.keys(payload).length === 1) {
+      return;
+    }
+
+    await this.axios.put('/movie/editor', payload);
+    logger.info('Updated quality profile and root folder of movie in Radarr.', {
+      label: 'Radarr',
+      movieId,
+      ...settings,
+    });
+  }
+
   public async searchMovie(movieId: number): Promise<void> {
     logger.info('Executing movie search command', {
       label: 'Radarr API',

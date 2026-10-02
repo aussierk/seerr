@@ -373,3 +373,36 @@ describe('RadarrAPI addMovie', () => {
     assert.strictEqual(search.mock.calls[0].arguments[0], 7);
   });
 });
+
+describe('RadarrAPI updateMovieSettings', () => {
+  afterEach(() => mock.restoreAll());
+
+  it('updates the profile and moves files when the root folder changes', async () => {
+    const radarr = buildRadarr();
+    const put = mock.method(getAxios(radarr), 'put', async () => ({}));
+
+    await radarr.updateMovieSettings(7, {
+      qualityProfileId: 4,
+      rootFolderPath: '/movies-4k',
+    });
+
+    assert.deepStrictEqual(put.mock.calls[0].arguments, [
+      '/movie/editor',
+      {
+        movieIds: [7],
+        qualityProfileId: 4,
+        rootFolderPath: '/movies-4k',
+        moveFiles: true,
+      },
+    ]);
+  });
+
+  it('does not call Radarr when there is nothing to change', async () => {
+    const radarr = buildRadarr();
+    const put = mock.method(getAxios(radarr), 'put', async () => ({}));
+
+    await radarr.updateMovieSettings(7, {});
+
+    assert.strictEqual(put.mock.callCount(), 0);
+  });
+});

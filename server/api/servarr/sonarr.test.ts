@@ -178,3 +178,41 @@ describe('SonarrAPI getSeriesByTvdbId', () => {
     });
   });
 });
+
+describe('SonarrAPI updateSeriesSettings', () => {
+  afterEach(() => mock.restoreAll());
+
+  it('updates profile, language and root folder through the editor', async () => {
+    const sonarr = buildSonarr();
+    const put = mock.method(getAxios(sonarr), 'put', async () => ({}));
+
+    await sonarr.updateSeriesSettings(9, {
+      qualityProfileId: 4,
+      languageProfileId: 2,
+      rootFolderPath: '/tv-4k',
+    });
+
+    assert.deepStrictEqual(put.mock.calls[0].arguments, [
+      '/series/editor',
+      {
+        seriesIds: [9],
+        qualityProfileId: 4,
+        languageProfileId: 2,
+        rootFolderPath: '/tv-4k',
+        moveFiles: true,
+      },
+    ]);
+  });
+
+  it('does not move files when only the profile changes', async () => {
+    const sonarr = buildSonarr();
+    const put = mock.method(getAxios(sonarr), 'put', async () => ({}));
+
+    await sonarr.updateSeriesSettings(9, { qualityProfileId: 4 });
+
+    assert.deepStrictEqual(put.mock.calls[0].arguments[1], {
+      seriesIds: [9],
+      qualityProfileId: 4,
+    });
+  });
+});
