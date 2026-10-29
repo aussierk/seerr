@@ -45,6 +45,8 @@ const messages = defineMessages('components.RequestModal', {
   numberofepisodes: '# of Episodes',
   seasonnumber: 'Season {number}',
   errorediting: 'Something went wrong while editing the request.',
+  approvalrefused:
+    'Your changes were saved, but the request conflicts with other requests. Resolve the conflict to approve it.',
   requestedited: 'Request for <strong>{title}</strong> edited successfully!',
   requestApproved: 'Request for <strong>{title}</strong> approved!',
   requestcancelled: 'Request for <strong>{title}</strong> canceled.',
@@ -113,6 +115,8 @@ const TvRequestModal = ({
       mutate('/api/v1/request/count');
     }
 
+    let approvalRefused = false;
+
     try {
       if (selectedSeasons.length > 0) {
         const response = await axios.put(`/api/v1/request/${editRequest.id}`, {
@@ -136,7 +140,14 @@ const TvRequestModal = ({
         }
 
         if (alsoApproveRequest) {
-          await axios.post(`/api/v1/request/${editRequest.id}/approve`);
+          try {
+            await axios.post(`/api/v1/request/${editRequest.id}/approve`);
+          } catch (e) {
+            if (!axios.isAxiosError(e) || e.response?.status !== 409) {
+              throw e;
+            }
+            approvalRefused = true;
+          }
         }
       } else {
         await axios.delete(`/api/v1/request/${editRequest.id}`);
@@ -148,9 +159,11 @@ const TvRequestModal = ({
         <span>
           {selectedSeasons.length > 0
             ? intl.formatMessage(
-                alsoApproveRequest
-                  ? messages.requestApproved
-                  : messages.requestedited,
+                approvalRefused
+                  ? messages.approvalrefused
+                  : alsoApproveRequest
+                    ? messages.requestApproved
+                    : messages.requestedited,
                 {
                   title: data?.name,
                   strong: (msg: React.ReactNode) => <strong>{msg}</strong>,
@@ -162,7 +175,7 @@ const TvRequestModal = ({
               })}
         </span>,
         {
-          appearance: 'success',
+          appearance: approvalRefused ? 'warning' : 'success',
           autoDismiss: true,
         }
       );

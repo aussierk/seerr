@@ -2,8 +2,10 @@ import Badge from '@app/components/Common/Badge';
 import Button from '@app/components/Common/Button';
 import CachedImage from '@app/components/Common/CachedImage';
 import Tooltip from '@app/components/Common/Tooltip';
+import RequestConflictModal from '@app/components/RequestConflictModal';
 import RequestModal from '@app/components/RequestModal';
 import useRequestOverride from '@app/hooks/useRequestOverride';
+import useToasts from '@app/hooks/useToasts';
 import { useUser } from '@app/hooks/useUser';
 import globalMessages from '@app/i18n/globalMessages';
 import defineMessages from '@app/utils/defineMessages';
@@ -12,12 +14,13 @@ import {
   CheckIcon,
   EyeIcon,
   PencilIcon,
+  ScaleIcon,
   TrashIcon,
   UserIcon,
   XMarkIcon,
 } from '@heroicons/react/24/solid';
 import { MediaRequestStatus } from '@server/constants/media';
-import type { MediaRequest } from '@server/entity/MediaRequest';
+import type { MediaRequestWithConflicts } from '@server/interfaces/api/requestInterfaces';
 import axios from 'axios';
 import Link from 'next/link';
 import { useState } from 'react';
@@ -35,27 +38,47 @@ const messages = defineMessages('components.RequestBlock', {
   requestedby: 'Requested By',
   lastmodifiedby: 'Last Modified By',
   approve: 'Approve Request',
+  failedmodify: 'Something went wrong while modifying the request.',
   decline: 'Decline Request',
   edit: 'Edit Request',
+  conflict: 'Conflict',
+  resolve: 'Resolve Conflict',
   delete: 'Delete Request',
 });
 
 interface RequestBlockProps {
-  request: MediaRequest;
+  request: MediaRequestWithConflicts;
   onUpdate?: () => void;
 }
 
 const RequestBlock = ({ request, onUpdate }: RequestBlockProps) => {
   const { user } = useUser();
   const intl = useIntl();
+  const { addToast } = useToasts();
   const [isUpdating, setIsUpdating] = useState(false);
   const [showEditModal, setShowEditModal] = useState(false);
+  const [showConflictModal, setShowConflictModal] = useState(false);
+  // The conflicts come with the request, and only for managers
+  const conflicts = request.conflicts ?? [];
   const { profile, rootFolder, server, languageProfile } =
     useRequestOverride(request);
 
   const updateRequest = async (type: 'approve' | 'decline'): Promise<void> => {
     setIsUpdating(true);
-    await axios.post(`/api/v1/request/${request.id}/${type}`);
+    try {
+      await axios.post(`/api/v1/request/${request.id}/${type}`);
+    } catch (e) {
+      const conflicting = axios.isAxiosError(e) && e.response?.status === 409;
+
+      addToast(
+        intl.formatMessage(
+          conflicting
+            ? globalMessages.resolveConflictFirst
+            : messages.failedmodify
+        ),
+        { autoDismiss: true, appearance: 'error' }
+      );
+    }
 
     if (onUpdate) {
       onUpdate();
@@ -92,6 +115,20 @@ const RequestBlock = ({ request, onUpdate }: RequestBlockProps) => {
           setShowEditModal(false);
         }}
       />
+      {showConflictModal && (
+        <RequestConflictModal
+          request={request}
+          conflicts={conflicts}
+          onCancel={() => setShowConflictModal(false)}
+          onResolved={() => {
+            setShowConflictModal(false);
+            if (onUpdate) {
+              onUpdate();
+            }
+            mutate('/api/v1/request/count');
+          }}
+        />
+      )}
       <div className="px-4 py-3 text-gray-300">
         <div className="flex items-center justify-between">
           <div className="mr-6 min-w-0 flex-1 flex-col items-center text-sm leading-5">
@@ -157,16 +194,18 @@ const RequestBlock = ({ request, onUpdate }: RequestBlockProps) => {
           <div className="ml-2 flex flex-shrink-0 flex-wrap">
             {request.status === MediaRequestStatus.PENDING && (
               <>
-                <Tooltip content={intl.formatMessage(messages.approve)}>
-                  <Button
-                    buttonType="success"
-                    className="mr-1"
-                    onClick={() => updateRequest('approve')}
-                    disabled={isUpdating}
-                  >
-                    <CheckIcon className="icon-sm" />
-                  </Button>
-                </Tooltip>
+                {conflicts.length === 0 && (
+                  <Tooltip content={intl.formatMessage(messages.approve)}>
+                    <Button
+                      buttonType="success"
+                      className="mr-1"
+                      onClick={() => updateRequest('approve')}
+                      disabled={isUpdating}
+                    >
+                      <CheckIcon className="icon-sm" />
+                    </Button>
+                  </Tooltip>
+                )}
                 <Tooltip content={intl.formatMessage(messages.decline)}>
                   <Button
                     buttonType="danger"
@@ -180,12 +219,24 @@ const RequestBlock = ({ request, onUpdate }: RequestBlockProps) => {
                 <Tooltip content={intl.formatMessage(messages.edit)}>
                   <Button
                     buttonType="warning"
+                    className={conflicts.length > 0 ? 'mr-1' : undefined}
                     onClick={() => setShowEditModal(true)}
                     disabled={isUpdating}
                   >
                     <PencilIcon className="icon-sm" />
                   </Button>
                 </Tooltip>
+                {conflicts.length > 0 && (
+                  <Tooltip content={intl.formatMessage(messages.resolve)}>
+                    <Button
+                      buttonType="primary"
+                      onClick={() => setShowConflictModal(true)}
+                      disabled={isUpdating}
+                    >
+                      <ScaleIcon className="icon-sm" />
+                    </Button>
+                  </Tooltip>
+                )}
               </>
             )}
             {request.status !== MediaRequestStatus.PENDING && (
@@ -223,6 +274,13 @@ const RequestBlock = ({ request, onUpdate }: RequestBlockProps) => {
                 <Badge badgeType="warning">
                   {intl.formatMessage(globalMessages.pending)}
                 </Badge>
+              )}
+              {conflicts.length > 0 && (
+                <span className="ml-1">
+                  <Badge badgeType="danger">
+                    {intl.formatMessage(messages.conflict)}
+                  </Badge>
+                </span>
               )}
               {request.status === MediaRequestStatus.FAILED && (
                 <Badge badgeType="danger">

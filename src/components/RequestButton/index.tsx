@@ -1,6 +1,7 @@
 import ButtonWithDropdown from '@app/components/Common/ButtonWithDropdown';
 import RequestModal from '@app/components/RequestModal';
 import useSettings from '@app/hooks/useSettings';
+import useToasts from '@app/hooks/useToasts';
 import { Permission, useUser } from '@app/hooks/useUser';
 import globalMessages from '@app/i18n/globalMessages';
 import defineMessages from '@app/utils/defineMessages';
@@ -20,6 +21,7 @@ import { useIntl } from 'react-intl';
 import { mutate } from 'swr';
 
 const messages = defineMessages('components.RequestButton', {
+  failedmodify: 'Something went wrong while modifying the request.',
   viewrequest: 'View Request',
   viewrequest4k: 'View 4K Request',
   requestmore: 'Request More',
@@ -63,6 +65,7 @@ const RequestButton = ({
   is4kShowComplete = false,
 }: RequestButtonProps) => {
   const intl = useIntl();
+  const { addToast } = useToasts();
   const settings = useSettings();
   const { user, hasPermission } = useUser();
   const [showRequestModal, setShowRequestModal] = useState(false);
@@ -93,16 +96,29 @@ const RequestButton = ({
       : undefined;
   }, [active4kRequests, user]);
 
+  // An approval is refused while the request conflicts with another
+  const showModifyError = (e: unknown) =>
+    addToast(
+      intl.formatMessage(
+        axios.isAxiosError(e) && e.response?.status === 409
+          ? globalMessages.resolveConflictFirst
+          : messages.failedmodify
+      ),
+      { autoDismiss: true, appearance: 'error' }
+    );
+
   const modifyRequest = async (
     request: MediaRequest,
     type: 'approve' | 'decline'
   ) => {
-    const response = await axios.post(`/api/v1/request/${request.id}/${type}`);
-
-    if (response) {
-      onUpdate();
-      mutate('/api/v1/request/count');
+    try {
+      await axios.post(`/api/v1/request/${request.id}/${type}`);
+    } catch (e) {
+      showModifyError(e);
     }
+
+    onUpdate();
+    mutate('/api/v1/request/count');
   };
 
   const modifyRequests = async (
@@ -113,11 +129,19 @@ const RequestButton = ({
       return;
     }
 
-    await Promise.all(
+    // The requests that can be modified still are when one is refused
+    const results = await Promise.allSettled(
       requests.map(async (request) => {
         return axios.post(`/api/v1/request/${request.id}/${type}`);
       })
     );
+    const refused = results.find(
+      (result): result is PromiseRejectedResult => result.status === 'rejected'
+    );
+
+    if (refused) {
+      showModifyError(refused.reason);
+    }
 
     onUpdate();
     mutate('/api/v1/request/count');
