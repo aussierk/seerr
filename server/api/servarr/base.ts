@@ -16,6 +16,89 @@ export function mergeTags(
   return { tags: merged, changed };
 }
 
+// Windows paths (a drive letter or a UNC share) ignore case, POSIX paths do not
+const isWindowsPath = (value: string): boolean =>
+  /^[A-Za-z]:/.test(value) || value.startsWith('\\\\');
+
+// Whether an item's path sits under a root folder, whichever way the slashes lean
+export function isInRootFolder(path: string, rootFolder: string): boolean {
+  const ignoreCase = isWindowsPath(path) || isWindowsPath(rootFolder);
+  const normalize = (value: string) => {
+    const normalized = value.replace(/\\/g, '/').replace(/\/+$/, '');
+    return ignoreCase ? normalized.toLowerCase() : normalized;
+  };
+
+  return (
+    normalize(path) === normalize(rootFolder) ||
+    normalize(path).startsWith(`${normalize(rootFolder)}/`)
+  );
+}
+
+const isSameFolder = (a: string, b: string): boolean =>
+  isInRootFolder(a, b) && isInRootFolder(b, a);
+
+export type ItemSettingsChange = {
+  qualityProfileId?: number;
+  rootFolderPath?: string;
+  languageProfileId?: number;
+};
+
+// The values a server hands out when a request picks nothing. A request carrying
+// one of them has not chosen it: the advanced form pre-fills them.
+export type ServerDefaults = {
+  rootFolders?: string[];
+  profileIds?: number[];
+  languageProfileIds?: number[];
+};
+
+// What the request asks for that the item does not already have. Anything the
+// request leaves unset, or that is just a server default, keeps the item's own
+// value.
+export function getSettingsChange(
+  item: {
+    qualityProfileId: number;
+    path?: string;
+    rootFolderPath?: string;
+    languageProfileId?: number;
+  },
+  request: {
+    profileId?: number | null;
+    rootFolder?: string | null;
+    languageProfileId?: number | null;
+  },
+  defaults?: ServerDefaults
+): ItemSettingsChange {
+  const currentPath = item.rootFolderPath ?? item.path;
+  const change: ItemSettingsChange = {};
+
+  if (
+    request.profileId &&
+    request.profileId !== item.qualityProfileId &&
+    !defaults?.profileIds?.includes(request.profileId)
+  ) {
+    change.qualityProfileId = request.profileId;
+  }
+  if (
+    request.rootFolder &&
+    currentPath &&
+    !isInRootFolder(currentPath, request.rootFolder) &&
+    !defaults?.rootFolders?.some((folder) =>
+      isSameFolder(folder, request.rootFolder as string)
+    )
+  ) {
+    change.rootFolderPath = request.rootFolder;
+  }
+  if (
+    request.languageProfileId &&
+    request.languageProfileId !== item.languageProfileId &&
+    !defaults?.languageProfileIds?.includes(request.languageProfileId)
+  ) {
+    change.languageProfileId = request.languageProfileId;
+  }
+
+  return change;
+}
+
 export interface SystemStatus {
   version: string;
   buildTime: Date;

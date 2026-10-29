@@ -1,3 +1,5 @@
+import type { ServerDefaults } from '@server/api/servarr/base';
+import { getSettingsChange } from '@server/api/servarr/base';
 import type { RadarrMovieOptions } from '@server/api/servarr/radarr';
 import RadarrAPI from '@server/api/servarr/radarr';
 import type {
@@ -18,9 +20,12 @@ import { MediaRequest } from '@server/entity/MediaRequest';
 import Season from '@server/entity/Season';
 import SeasonRequest from '@server/entity/SeasonRequest';
 import notificationManager, { Notification } from '@server/lib/notifications';
+import { Permission } from '@server/lib/permissions';
+import { resolveServiceDefaults } from '@server/lib/serviceDefaults';
 import {
   getSettings,
   type DVRSettings,
+  type RadarrSettings,
   type SonarrSettings,
 } from '@server/lib/settings';
 import logger from '@server/logger';
@@ -123,45 +128,125 @@ export class MediaRequestSubscriber implements EntitySubscriberInterface<MediaRe
     }
   }
 
-  // Merges the configured and requester tags into an item that already exists
-  // in the *arr. `existing` is the series when the caller already fetched it,
-  // so Sonarr does not read it again.
+  // Changing the profile or root folder of an item that is already in the *arr
+  // can re-download it or move its files, so it needs the admin's opt-in and a
+  // manager who approved the request. A request whose server was ignored (it
+  // fell back to the default one) never gets to change anything.
+  private mayUpdateSettings(
+    entity: MediaRequest,
+    useRequestOverrides: boolean
+  ): boolean {
+    return (
+      useRequestOverrides &&
+      getSettings().main.updateExistingItems &&
+      !!entity.modifiedBy?.hasPermission(Permission.MANAGE_REQUESTS)
+    );
+  }
+
+  // What a request that picks nothing gets, whether or not the series is anime.
+  // The advanced form pre-fills these, so a request carrying one has not chosen it.
+  private serverDefaults(
+    entity: MediaRequest,
+    server: DVRSettings
+  ): ServerDefaults {
+    const defaults = [false, true].map((isAnime) =>
+      resolveServiceDefaults(
+        entity.type,
+        server as RadarrSettings | SonarrSettings,
+        isAnime
+      )
+    );
+
+    return {
+      rootFolders: defaults.flatMap(({ rootFolder }) => rootFolder ?? []),
+      profileIds: defaults.flatMap(({ profileId }) => profileId ?? []),
+      languageProfileIds: defaults.flatMap(
+        ({ languageProfileId }) => languageProfileId ?? []
+      ),
+    };
+  }
+
+  // Brings an item that already exists in the *arr in line with the request:
+  // merges the configured and requester tags, and, when mayUpdateSettings allows
+  // it, applies the profile and root folder the request chose itself (a request
+  // that takes the server defaults never overrides the item). `tags` is omitted
+  // when addMovie/addSeries merges them itself. `existing` is the series when
+  // the caller already fetched it, so Sonarr does not read it again.
   private async syncExistingItem(
     entity: MediaRequest,
     api: RadarrAPI | SonarrAPI,
     server: DVRSettings,
     itemId: number,
-    { tags, existing }: { tags: number[]; existing?: SonarrSeries }
+    {
+      tags,
+      existing,
+      useRequestOverrides = true,
+    }: {
+      tags?: number[];
+      existing?: SonarrSeries;
+      useRequestOverrides?: boolean;
+    }
   ): Promise<void> {
+    if (tags) {
+      await this.bestEffort(
+        entity,
+        'apply tags to the existing item',
+        async () => {
+          const merged = [...tags];
+          if (server.tagRequests) {
+            // a failed lookup still applies the configured tags
+            await this.bestEffort(
+              entity,
+              'resolve the requester tag',
+              async () => {
+                const userTagId = await this.getOrCreateUserTag(
+                  api,
+                  `${server.hostname}:${server.port}`,
+                  entity
+                );
+                if (userTagId && !merged.includes(userTagId)) {
+                  merged.push(userTagId);
+                }
+              }
+            );
+          }
+          if (merged.length === 0) {
+            return;
+          }
+          if (api instanceof SonarrAPI) {
+            await api.addTags(itemId, merged, existing);
+          } else {
+            await api.addTags(itemId, merged);
+          }
+        }
+      );
+    }
+
+    if (!this.mayUpdateSettings(entity, useRequestOverrides)) {
+      return;
+    }
+
+    // The fetch sits inside bestEffort too: a failed read must log and continue,
+    // not reach the caller's catch and mark the request FAILED.
     await this.bestEffort(
       entity,
-      'apply tags to the existing item',
+      'update settings of the existing item',
       async () => {
-        const merged = [...tags];
-        if (server.tagRequests) {
-          // a failed lookup still applies the configured tags
-          await this.bestEffort(
-            entity,
-            'resolve the requester tag',
-            async () => {
-              const userTagId = await this.getOrCreateUserTag(
-                api,
-                `${server.hostname}:${server.port}`,
-                entity
-              );
-              if (userTagId && !merged.includes(userTagId)) {
-                merged.push(userTagId);
-              }
-            }
-          );
-        }
-        if (merged.length === 0) {
-          return;
-        }
+        const item =
+          existing ??
+          (await (api instanceof SonarrAPI
+            ? api.getSeriesById(itemId)
+            : api.getMovie({ id: itemId })));
+        const change = getSettingsChange(
+          item,
+          entity,
+          this.serverDefaults(entity, server)
+        );
+
         if (api instanceof SonarrAPI) {
-          await api.addTags(itemId, merged, existing);
+          await api.updateSeriesSettings(itemId, change);
         } else {
-          await api.addTags(itemId, merged);
+          await api.updateMovieSettings(itemId, change);
         }
       }
     );
@@ -493,7 +578,7 @@ export class MediaRequestSubscriber implements EntitySubscriberInterface<MediaRe
               radarr,
               radarrSettings,
               itemId,
-              { tags }
+              { tags, useRequestOverrides }
             );
           }
 
@@ -533,6 +618,13 @@ export class MediaRequestSubscriber implements EntitySubscriberInterface<MediaRe
           tags,
           searchNow: !radarrSettings.preventSearch,
         };
+
+        const itemId = this.existingItemId(entity, media, radarrSettings);
+        if (itemId) {
+          await this.syncExistingItem(entity, radarr, radarrSettings, itemId, {
+            useRequestOverrides,
+          });
+        }
 
         // Run entity asynchronously so we don't wait for it on the UI side
         radarr
@@ -757,6 +849,7 @@ export class MediaRequestSubscriber implements EntitySubscriberInterface<MediaRe
                       useRequestOverrides
                     ),
                     existing,
+                    useRequestOverrides,
                   }
                 );
               }
@@ -890,6 +983,13 @@ export class MediaRequestSubscriber implements EntitySubscriberInterface<MediaRe
           monitorNewItems: sonarrSettings.monitorNewItems,
           searchNow: !sonarrSettings.preventSearch,
         };
+
+        const itemId = this.existingItemId(entity, media, sonarrSettings);
+        if (itemId) {
+          await this.syncExistingItem(entity, sonarr, sonarrSettings, itemId, {
+            useRequestOverrides,
+          });
+        }
 
         // Run entity asynchronously so we don't wait for it on the UI side
         sonarr

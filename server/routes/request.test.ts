@@ -32,6 +32,7 @@ import type { Express } from 'express';
 import express from 'express';
 import session from 'express-session';
 import request from 'supertest';
+import { EntityManager } from 'typeorm';
 import authRoutes from './auth';
 import requestRoutes from './request';
 
@@ -2131,5 +2132,275 @@ describe('DELETE /request/:requestId, orphaned season status reset', () => {
     const updated = await mediaRepo.findOneOrFail({ where: { id: media.id } });
     assert.strictEqual(updated.seasons[0].status, MediaStatus.UNKNOWN);
     assert.strictEqual(updated.seasons[0].status4k, MediaStatus.PROCESSING);
+  });
+});
+
+describe('request conflicts', () => {
+  async function seedConflict(
+    secondStatus = MediaRequestStatus.PENDING,
+    tmdbId = 33333
+  ) {
+    configureRadarr([{ id: 0, isDefault: true, is4k: false }]);
+    getSettings().sonarr = [];
+
+    const userRepo = getRepository(User);
+    const requestRepo = getRepository(MediaRequest);
+    const demo = await userRepo.findOneOrFail({
+      where: { email: 'demo@seerr.dev' },
+    });
+    const admin = await userRepo.findOneOrFail({
+      where: { email: 'admin@seerr.dev' },
+    });
+    const media = await getRepository(Media).save(
+      new Media({
+        mediaType: MediaType.MOVIE,
+        tmdbId,
+        status: MediaStatus.PENDING,
+        status4k: MediaStatus.UNKNOWN,
+      })
+    );
+
+    const first = await requestRepo.save(
+      new MediaRequest({
+        type: MediaType.MOVIE,
+        status: secondStatus,
+        media,
+        requestedBy: demo,
+        is4k: false,
+        profileId: 4,
+        rootFolder: '/movies',
+      })
+    );
+    const second = await requestRepo.save(
+      new MediaRequest({
+        type: MediaType.MOVIE,
+        status: MediaRequestStatus.PENDING,
+        media,
+        requestedBy: admin,
+        is4k: false,
+        profileId: 5,
+        rootFolder: '/movies-hd',
+      })
+    );
+
+    return { first, second };
+  }
+
+  describe('GET /request/:requestId', () => {
+    it('lists the conflicting requests for someone who manages requests', async () => {
+      const { first, second } = await seedConflict();
+
+      const admin = await loginAs('admin@seerr.dev', 'test1234');
+      const res = await admin.get(`/request/${second.id}`);
+
+      assert.strictEqual(res.status, 200);
+      assert.strictEqual(res.body.conflicts.length, 1);
+      assert.strictEqual(res.body.conflicts[0].request.id, first.id);
+      assert.strictEqual(res.body.conflicts[0].request.profileId, 4);
+      assert.strictEqual(
+        res.body.conflicts[0].request.requestedBy.id,
+        first.requestedBy.id
+      );
+    });
+
+    it('does not show conflicts to a user who only sees their own request', async () => {
+      const { first } = await seedConflict();
+
+      const demo = await loginAs('demo@seerr.dev', 'test1234');
+      const res = await demo.get(`/request/${first.id}`);
+
+      assert.strictEqual(res.status, 200);
+      assert.ok(!('conflicts' in res.body));
+    });
+
+    it('has no conflicts for a request that is not pending', async () => {
+      const { first } = await seedConflict(MediaRequestStatus.COMPLETED);
+
+      const admin = await loginAs('admin@seerr.dev', 'test1234');
+      const res = await admin.get(`/request/${first.id}`);
+
+      assert.strictEqual(res.status, 200);
+      assert.deepStrictEqual(res.body.conflicts, []);
+    });
+  });
+
+  describe('POST /request/:requestId/approve', () => {
+    it('refuses to approve a request that conflicts with another', async (t) => {
+      const sendToRadarr = t.mock.method(
+        MediaRequestSubscriber.prototype,
+        'sendToRadarr',
+        async () => undefined
+      );
+      const { second } = await seedConflict();
+      const admin = await loginAs('admin@seerr.dev', 'test1234');
+
+      const res = await admin.post(`/request/${second.id}/approve`);
+
+      assert.strictEqual(res.status, 409);
+      assert.match(res.body.message, /resolve the conflict/i);
+      const stillPending = await getRepository(MediaRequest).findOneOrFail({
+        where: { id: second.id },
+      });
+      assert.strictEqual(stillPending.status, MediaRequestStatus.PENDING);
+      assert.ok(
+        !sendToRadarr.mock.calls.some(
+          (call) =>
+            (call.arguments[0] as MediaRequest).status ===
+            MediaRequestStatus.APPROVED
+        )
+      );
+    });
+
+    it('still approves a request that does not conflict', async (t) => {
+      t.mock.method(
+        MediaRequestSubscriber.prototype,
+        'sendToRadarr',
+        async () => undefined
+      );
+      const mediaRequest = await seedRequest();
+      const admin = await loginAs('admin@seerr.dev', 'test1234');
+
+      const res = await admin.post(`/request/${mediaRequest.id}/approve`);
+
+      assert.strictEqual(res.status, 200);
+      assert.strictEqual(res.body.status, MediaRequestStatus.APPROVED);
+    });
+
+    it('still declines a request that conflicts', async () => {
+      const { second } = await seedConflict();
+      const admin = await loginAs('admin@seerr.dev', 'test1234');
+
+      const res = await admin.post(`/request/${second.id}/decline`);
+
+      assert.strictEqual(res.status, 200);
+      assert.strictEqual(res.body.status, MediaRequestStatus.DECLINED);
+    });
+  });
+
+  describe('POST /request/:requestId/resolve', () => {
+    it('approves the request and gives the other pending ones its settings', async (t) => {
+      const { first, second } = await seedConflict();
+      const admin = await loginAs('admin@seerr.dev', 'test1234');
+      const sendToRadarr = t.mock.method(
+        MediaRequestSubscriber.prototype,
+        'sendToRadarr',
+        async () => undefined
+      );
+
+      const res = await admin.post(`/request/${second.id}/resolve`);
+
+      assert.strictEqual(res.status, 200);
+      assert.strictEqual(res.body.status, MediaRequestStatus.APPROVED);
+      // The subscriber sees every save and only sends approved requests on
+      const sent = sendToRadarr.mock.calls
+        .map((call) => call.arguments[0] as MediaRequest)
+        .filter(
+          (sentRequest) => sentRequest.status === MediaRequestStatus.APPROVED
+        );
+      assert.deepStrictEqual(
+        sent.map((sentRequest) => sentRequest.id),
+        [second.id]
+      );
+      const repo = getRepository(MediaRequest);
+      const winner = await repo.findOneOrFail({
+        where: { id: second.id },
+        relations: { modifiedBy: true },
+      });
+      assert.strictEqual(winner.modifiedBy?.email, 'admin@seerr.dev');
+
+      const loser = await repo.findOneOrFail({ where: { id: first.id } });
+      assert.strictEqual(loser.status, MediaRequestStatus.PENDING);
+      assert.strictEqual(loser.profileId, 5);
+      assert.strictEqual(loser.rootFolder, '/movies-hd');
+    });
+
+    it('leaves the other requests as they were when approving the winner fails', async (t) => {
+      t.mock.method(
+        MediaRequestSubscriber.prototype,
+        'sendToRadarr',
+        async () => undefined
+      );
+      const { first, second } = await seedConflict();
+      const admin = await loginAs('admin@seerr.dev', 'test1234');
+      const save = EntityManager.prototype.save as (
+        ...args: unknown[]
+      ) => Promise<unknown>;
+      t.mock.method(
+        EntityManager.prototype,
+        'save',
+        async function (this: EntityManager, ...args: unknown[]) {
+          const entity = args.find((arg) => arg instanceof MediaRequest);
+          if (
+            entity instanceof MediaRequest &&
+            entity.status === MediaRequestStatus.APPROVED
+          ) {
+            throw new Error('database is gone');
+          }
+          return save.apply(this, args);
+        }
+      );
+
+      const res = await admin.post(`/request/${second.id}/resolve`);
+
+      assert.notStrictEqual(res.status, 200);
+      const repo = getRepository(MediaRequest);
+      const untouched = await repo.findOneOrFail({ where: { id: first.id } });
+      assert.strictEqual(untouched.profileId, 4);
+      assert.strictEqual(untouched.rootFolder, '/movies');
+      const target = await repo.findOneOrFail({ where: { id: second.id } });
+      assert.strictEqual(target.status, MediaRequestStatus.PENDING);
+    });
+
+    it('leaves requests that are already past pending as they were', async (t) => {
+      t.mock.method(
+        MediaRequestSubscriber.prototype,
+        'sendToRadarr',
+        async () => undefined
+      );
+      const { first, second } = await seedConflict(
+        MediaRequestStatus.COMPLETED
+      );
+      const admin = await loginAs('admin@seerr.dev', 'test1234');
+
+      const res = await admin.post(`/request/${second.id}/resolve`);
+
+      assert.strictEqual(res.status, 200);
+      const untouched = await getRepository(MediaRequest).findOneOrFail({
+        where: { id: first.id },
+      });
+      assert.strictEqual(untouched.status, MediaRequestStatus.COMPLETED);
+      assert.strictEqual(untouched.profileId, 4);
+    });
+
+    it('rejects a user who cannot manage requests', async () => {
+      const { second } = await seedConflict();
+      const demo = await loginAs('demo@seerr.dev', 'test1234');
+
+      const res = await demo.post(`/request/${second.id}/resolve`);
+
+      assert.strictEqual(res.status, 403);
+    });
+
+    it('rejects a request that has no conflicts', async () => {
+      const mediaRequest = await seedRequest();
+      const admin = await loginAs('admin@seerr.dev', 'test1234');
+
+      const res = await admin.post(`/request/${mediaRequest.id}/resolve`);
+
+      assert.strictEqual(res.status, 409);
+      assert.match(res.body.message, /no conflicts/i);
+    });
+
+    it('rejects a request that is no longer pending', async () => {
+      const { second } = await seedConflict();
+      await getRepository(MediaRequest).update(second.id, {
+        status: MediaRequestStatus.DECLINED,
+      });
+      const admin = await loginAs('admin@seerr.dev', 'test1234');
+
+      const res = await admin.post(`/request/${second.id}/resolve`);
+
+      assert.strictEqual(res.status, 409);
+    });
   });
 });

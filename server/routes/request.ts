@@ -5,7 +5,7 @@ import {
   MediaStatus,
   MediaType,
 } from '@server/constants/media';
-import { getRepository } from '@server/datasource';
+import dataSource, { getRepository } from '@server/datasource';
 import Media from '@server/entity/Media';
 import {
   BlocklistedMediaError,
@@ -22,6 +22,7 @@ import type {
   RequestResultsResponse,
 } from '@server/interfaces/api/requestInterfaces';
 import { Permission } from '@server/lib/permissions';
+import { getConflictsFor } from '@server/lib/requestConflicts';
 import { getOwnBlockedSeasons } from '@server/lib/requestSeasons';
 import { getSettings } from '@server/lib/settings';
 import logger from '@server/logger';
@@ -33,6 +34,7 @@ import requestLock, {
   userKey,
 } from '@server/utils/requestLock';
 import { Router } from 'express';
+import { In } from 'typeorm';
 
 const requestRoutes = Router();
 requestRoutes.get<Record<string, unknown>, RequestResultsResponse>(
@@ -277,6 +279,16 @@ requestRoutes.get<Record<string, unknown>, RequestResultsResponse>(
         });
       }
 
+      // add the conflicts of pending requests if user manages requests
+      if (req.user?.hasPermission(Permission.MANAGE_REQUESTS)) {
+        const conflicts = await getConflictsFor(requests);
+
+        mappedRequests = mappedRequests.map((r) => ({
+          ...r,
+          conflicts: conflicts.get(r.id) ?? [],
+        }));
+      }
+
       return res.status(200).json({
         pageInfo: {
           pages: Math.ceil(requestCount / pageSize),
@@ -454,6 +466,15 @@ requestRoutes.get('/:requestId', async (req, res, next) => {
       return next({
         status: 403,
         message: 'You do not have permission to view this request.',
+      });
+    }
+
+    if (req.user?.hasPermission(Permission.MANAGE_REQUESTS)) {
+      const conflicts = await getConflictsFor([request]);
+
+      return res.status(200).json({
+        ...request,
+        conflicts: conflicts.get(request.id) ?? [],
       });
     }
 
@@ -771,6 +792,89 @@ requestRoutes.post<{
   }
 );
 
+// Registered before the approve/decline route, which would take "resolve" as a status
+requestRoutes.post<{
+  requestId: string;
+}>(
+  '/:requestId/resolve',
+  isAuthenticated(Permission.MANAGE_REQUESTS),
+  async (req, res, next) => {
+    const requestRepository = getRepository(MediaRequest);
+    const requestId = Number(req.params.requestId);
+
+    try {
+      return await requestLock.dispatch(requestKey(requestId), async () => {
+        const request = await requestRepository.findOneOrFail({
+          where: { id: requestId },
+          relations: { requestedBy: true, modifiedBy: true },
+        });
+
+        if (request.status !== MediaRequestStatus.PENDING) {
+          return next({
+            status: 409,
+            message: 'Only pending requests can be resolved.',
+          });
+        }
+
+        // Same key as create, so no new request lands between the check and the save
+        return mediaLock.dispatch(
+          mediaKey(request.type, request.media.tmdbId),
+          async () => {
+            const conflicts = (await getConflictsFor([request])).get(
+              request.id
+            );
+
+            if (!conflicts?.length) {
+              return next({
+                status: 409,
+                message: 'This request has no conflicts to resolve.',
+              });
+            }
+
+            // The other pending requests take this request's settings and stay
+            // pending. Ones already sent on keep the settings they were sent with.
+            const pendingIds = conflicts
+              .filter(
+                ({ request: other }) =>
+                  other.status === MediaRequestStatus.PENDING
+              )
+              .map(({ request: other }) => other.id);
+            const others = pendingIds.length
+              ? await requestRepository.find({ where: { id: In(pendingIds) } })
+              : [];
+
+            // All or nothing. The target is saved last, as that is the save that
+            // sends it on to Radarr/Sonarr, so a failure can't leave a request
+            // sent with the others still rewritten.
+            await dataSource.transaction(async (manager) => {
+              const repository = manager.getRepository(MediaRequest);
+
+              for (const other of others) {
+                other.profileId = request.profileId;
+                other.rootFolder = request.rootFolder;
+                other.languageProfileId = request.languageProfileId;
+                await repository.save(other);
+              }
+
+              request.status = MediaRequestStatus.APPROVED;
+              request.modifiedBy = req.user;
+              await repository.save(request);
+            });
+
+            return res.status(200).json(request);
+          }
+        );
+      });
+    } catch (e) {
+      logger.error('Error resolving request conflicts', {
+        label: 'Media Request',
+        message: e.message,
+      });
+      next({ status: 404, message: 'Request not found.' });
+    }
+  }
+);
+
 requestRoutes.post<{
   requestId: string;
   status: 'approve' | 'decline';
@@ -811,11 +915,39 @@ requestRoutes.post<{
           });
         }
 
-        request.status = newStatus;
-        request.modifiedBy = req.user;
-        await requestRepository.save(request);
+        const update = async () => {
+          request.status = newStatus;
+          request.modifiedBy = req.user;
+          await requestRepository.save(request);
 
-        return res.status(200).json(request);
+          return res.status(200).json(request);
+        };
+
+        if (newStatus !== MediaRequestStatus.APPROVED) {
+          return update();
+        }
+
+        // Conflicting requests are held until a manager picks which settings
+        // win, so approving one on its own is refused. Same key as create and
+        // resolve, so no request lands between the check and the save.
+        return mediaLock.dispatch(
+          mediaKey(request.type, request.media.tmdbId),
+          async () => {
+            const conflicts = (await getConflictsFor([request])).get(
+              request.id
+            );
+
+            if (conflicts?.length) {
+              return next({
+                status: 409,
+                message:
+                  'This request conflicts with other requests. Resolve the conflict instead.',
+              });
+            }
+
+            return update();
+          }
+        );
       });
     } catch (e) {
       logger.error('Error processing request update', {

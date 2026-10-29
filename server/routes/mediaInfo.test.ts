@@ -17,8 +17,10 @@ import Issue from '@server/entity/Issue';
 import IssueComment from '@server/entity/IssueComment';
 import Media from '@server/entity/Media';
 import { MediaRequest } from '@server/entity/MediaRequest';
+import SeasonRequest from '@server/entity/SeasonRequest';
 import { User } from '@server/entity/User';
 import { Permission } from '@server/lib/permissions';
+import type { SonarrSettings } from '@server/lib/settings';
 import { getSettings } from '@server/lib/settings';
 import { checkUser, isAuthenticated } from '@server/middleware/auth';
 import { setupTestDb } from '@server/test/db';
@@ -79,6 +81,26 @@ Object.defineProperty(TheMovieDb.prototype, 'getTvShow', {
         created_by: [],
         videos: { results: [] },
       }) as unknown as TmdbTvDetails;
+  },
+  set() {},
+  configurable: true,
+});
+
+// How often the series details are fetched from TMDB
+let tvShowCalls = 0;
+const stubbedGetTvShow = Object.getOwnPropertyDescriptor(
+  TheMovieDb.prototype,
+  'getTvShow'
+)?.get;
+Object.defineProperty(TheMovieDb.prototype, 'getTvShow', {
+  get() {
+    const getTvShow = stubbedGetTvShow?.call(this) as (
+      ...args: unknown[]
+    ) => Promise<unknown>;
+    return async (...args: unknown[]) => {
+      tvShowCalls += 1;
+      return getTvShow(...args);
+    };
   },
   set() {},
   configurable: true,
@@ -271,3 +293,131 @@ for (const { path, tmdbId, mediaType } of routes) {
     }
   });
 }
+
+async function seedConflictingPair(mediaType: MediaType, tmdbId: number) {
+  const userRepository = getRepository(User);
+  const demo = await userRepository.findOneOrFail({
+    where: { email: 'demo@seerr.dev' },
+  });
+  const admin = await userRepository.findOneOrFail({
+    where: { email: 'admin@seerr.dev' },
+  });
+  const media = await getRepository(Media).save(
+    new Media({
+      mediaType,
+      tmdbId,
+      status: MediaStatus.PENDING,
+      status4k: MediaStatus.UNKNOWN,
+    })
+  );
+  const pending = (requestedBy: User, profileId: number) =>
+    getRepository(MediaRequest).save(
+      new MediaRequest({
+        type: mediaType,
+        media,
+        requestedBy,
+        status: MediaRequestStatus.PENDING,
+        is4k: false,
+        profileId,
+        seasons:
+          mediaType === MediaType.TV
+            ? [
+                new SeasonRequest({
+                  seasonNumber: 1,
+                  status: MediaRequestStatus.PENDING,
+                }),
+              ]
+            : undefined,
+      })
+    );
+
+  return { first: await pending(demo, 4), second: await pending(admin, 5) };
+}
+
+type RequestInfo = { id: number; conflicts?: { request: { id: number } }[] };
+
+for (const { path, tmdbId, mediaType } of routes) {
+  describe(`GET ${path}/:id request conflicts`, () => {
+    const requestsOf = (body: { mediaInfo: { requests: RequestInfo[] } }) =>
+      new Map(body.mediaInfo.requests.map((r) => [r.id, r]));
+
+    it('gives a manager the conflicts of each pending request', async () => {
+      const { first, second } = await seedConflictingPair(mediaType, tmdbId);
+      const admin = await loginAs('admin@seerr.dev', 'test1234');
+
+      const res = await admin.get(`${path}/${tmdbId}`);
+
+      assert.strictEqual(res.status, 200);
+      const requests = requestsOf(res.body);
+      assert.deepStrictEqual(
+        requests.get(first.id)?.conflicts?.map((c) => c.request.id),
+        [second.id]
+      );
+      assert.deepStrictEqual(
+        requests.get(second.id)?.conflicts?.map((c) => c.request.id),
+        [first.id]
+      );
+    });
+
+    it('gives no conflicts to someone who cannot manage requests', async () => {
+      await seedConflictingPair(mediaType, tmdbId);
+      await setViewerPermissions(Permission.REQUEST);
+      const viewer = await loginAs('demo@seerr.dev', 'test1234');
+
+      const res = await viewer.get(`${path}/${tmdbId}`);
+
+      assert.strictEqual(res.status, 200);
+      assert.strictEqual(res.body.mediaInfo.requests.length, 2);
+      for (const request of res.body.mediaInfo.requests) {
+        assert.ok(!('conflicts' in request));
+      }
+    });
+
+    it('leaves a request that is not pending without conflicts', async () => {
+      const { first, second } = await seedConflictingPair(mediaType, tmdbId);
+      await getRepository(MediaRequest).update(second.id, {
+        status: MediaRequestStatus.APPROVED,
+      });
+      const admin = await loginAs('admin@seerr.dev', 'test1234');
+
+      const res = await admin.get(`${path}/${tmdbId}`);
+
+      const requests = requestsOf(res.body);
+      assert.deepStrictEqual(
+        requests.get(first.id)?.conflicts?.map((c) => c.request.id),
+        [second.id]
+      );
+      assert.deepStrictEqual(requests.get(second.id)?.conflicts, []);
+    });
+  });
+}
+
+describe('GET /tv/:id request conflicts and TMDB', () => {
+  it('does not fetch the series again for its conflicts', async () => {
+    const settings = getSettings();
+    const priorSonarr = settings.sonarr;
+    // Anime defaults are what make a conflict check look a series up
+    settings.sonarr = [
+      { id: 1, isDefault: true, is4k: false, activeAnimeDirectory: '/anime' },
+    ] as SonarrSettings[];
+
+    try {
+      await seedConflictingPair(MediaType.TV, 67890);
+      await setViewerPermissions(Permission.REQUEST);
+      const viewer = await loginAs('demo@seerr.dev', 'test1234');
+      const admin = await loginAs('admin@seerr.dev', 'test1234');
+
+      tvShowCalls = 0;
+      assert.strictEqual((await viewer.get('/tv/67890')).status, 200);
+      const withoutConflicts = tvShowCalls;
+
+      tvShowCalls = 0;
+      assert.strictEqual((await admin.get('/tv/67890')).status, 200);
+
+      assert.ok(withoutConflicts > 0);
+      assert.strictEqual(tvShowCalls, withoutConflicts);
+    } finally {
+      settings.sonarr = priorSonarr;
+    }
+  });
+});
