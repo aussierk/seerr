@@ -268,11 +268,17 @@ const RequestCard = ({ request, onTitleData }: RequestCardProps) => {
       await axios.post(`/api/v1/request/${request.id}/${type}`);
       revalidate();
       mutate('/api/v1/request/count');
-    } catch {
-      addToast(intl.formatMessage(messages.failedmodify), {
-        autoDismiss: true,
-        appearance: 'error',
-      });
+    } catch (e) {
+      const conflicting = axios.isAxiosError(e) && e.response?.status === 409;
+
+      addToast(
+        intl.formatMessage(
+          conflicting
+            ? globalMessages.resolveConflictFirst
+            : messages.failedmodify
+        ),
+        { autoDismiss: true, appearance: 'error' }
+      );
     } finally {
       setUpdatingType(null);
     }

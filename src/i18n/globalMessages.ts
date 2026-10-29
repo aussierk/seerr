@@ -24,6 +24,8 @@ const globalMessages = defineMessages('i18n', {
   cancel: 'Cancel',
   canceling: 'Canceling…',
   approve: 'Approve',
+  resolveConflictFirst:
+    'This request conflicts with other requests. Resolve the conflict instead.',
   decline: 'Decline',
   delete: 'Delete',
   retry: 'Retry',

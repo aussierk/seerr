@@ -4,6 +4,7 @@ import Button from '@app/components/Common/Button';
 import CachedImage from '@app/components/Common/CachedImage';
 import ConfirmButton from '@app/components/Common/ConfirmButton';
 import Modal from '@app/components/Common/Modal';
+import RequestConflictModal from '@app/components/RequestConflictModal';
 import RequestModal from '@app/components/RequestModal';
 import StatusBadge from '@app/components/StatusBadge';
 import useDeepLinks from '@app/hooks/useDeepLinks';
@@ -19,13 +20,17 @@ import {
   ArrowPathIcon,
   CheckIcon,
   PencilIcon,
+  ScaleIcon,
   TrashIcon,
   XMarkIcon,
 } from '@heroicons/react/24/solid';
 import { MediaRequestStatus, MediaStatus } from '@server/constants/media';
 import type { MediaRequest } from '@server/entity/MediaRequest';
 import type { NonFunctionProperties } from '@server/interfaces/api/common';
-import type { RequestResultsResponse } from '@server/interfaces/api/requestInterfaces';
+import type {
+  RequestConflictInfo,
+  RequestResultsResponse,
+} from '@server/interfaces/api/requestInterfaces';
 import type { MovieDetails } from '@server/models/Movie';
 import type { TvDetails } from '@server/models/Tv';
 import axios from 'axios';
@@ -39,6 +44,8 @@ const messages = defineMessages('components.RequestList.RequestItem', {
   seasons: '{seasonCount, plural, one {Season} other {Seasons}}',
   failedretry: 'Something went wrong while retrying the request.',
   failedmodify: 'Something went wrong while modifying the request.',
+  conflict: 'Conflict',
+  resolve: 'Resolve Conflict',
   requested: 'Requested',
   requesteddate: 'Requested',
   modified: 'Modified',
@@ -313,7 +320,7 @@ const RequestItem = ({ request, revalidateList }: RequestItemProps) => {
     inView ? url : null
   );
   const { data: requestData, mutate: revalidate } = useSWR<
-    NonFunctionProperties<MediaRequest>
+    NonFunctionProperties<MediaRequest> & { conflicts?: RequestConflictInfo[] }
   >(`/api/v1/request/${request.id}`, {
     fallbackData: request,
     revalidateOnMount: false,
@@ -336,6 +343,7 @@ const RequestItem = ({ request, revalidateList }: RequestItemProps) => {
   const [updatingType, setUpdatingType] = useState<
     'approve' | 'decline' | null
   >(null);
+  const [showConflictModal, setShowConflictModal] = useState(false);
   const [forceDelete, setForceDelete] = useState<number | null>(null);
   const [isForcing, setIsForcing] = useState(false);
 
@@ -346,11 +354,20 @@ const RequestItem = ({ request, revalidateList }: RequestItemProps) => {
       revalidate();
       revalidateList();
       mutate('/api/v1/request/count');
-    } catch {
-      addToast(intl.formatMessage(messages.failedmodify), {
-        autoDismiss: true,
-        appearance: 'error',
-      });
+    } catch (e) {
+      const conflicting = axios.isAxiosError(e) && e.response?.status === 409;
+
+      addToast(
+        intl.formatMessage(
+          conflicting
+            ? globalMessages.resolveConflictFirst
+            : messages.failedmodify
+        ),
+        { autoDismiss: true, appearance: 'error' }
+      );
+      if (conflicting) {
+        revalidate();
+      }
     } finally {
       setUpdatingType(null);
     }
@@ -463,6 +480,19 @@ const RequestItem = ({ request, revalidateList }: RequestItemProps) => {
           setShowEditModal(false);
         }}
       />
+      {showConflictModal && requestData.conflicts && (
+        <RequestConflictModal
+          request={requestData as MediaRequest}
+          conflicts={requestData.conflicts}
+          onCancel={() => setShowConflictModal(false)}
+          onResolved={() => {
+            setShowConflictModal(false);
+            revalidate();
+            revalidateList();
+            mutate('/api/v1/request/count');
+          }}
+        />
+      )}
       {forceDelete !== null && (
         <Modal
           title={intl.formatMessage(messages.removearr, {
@@ -611,6 +641,15 @@ const RequestItem = ({ request, revalidateList }: RequestItemProps) => {
                   }
                 />
               )}
+              {requestData.status === MediaRequestStatus.PENDING &&
+                !!requestData.conflicts?.length && (
+                  <Badge
+                    badgeType="danger"
+                    href={`/${requestData.type}/${requestData.media.tmdbId}?manage=1`}
+                  >
+                    {intl.formatMessage(messages.conflict)}
+                  </Badge>
+                )}
             </div>
             <div className="card-field">
               {hasPermission(
@@ -781,15 +820,27 @@ const RequestItem = ({ request, revalidateList }: RequestItemProps) => {
             hasPermission(Permission.MANAGE_REQUESTS) && (
               <div className="flex w-full flex-row space-x-2">
                 <span className="w-full">
-                  <Button
-                    className="w-full"
-                    buttonType="success"
-                    onClick={() => modifyRequest('approve')}
-                    disabled={updatingType !== null}
-                  >
-                    {updatingType === 'approve' ? <Spinner /> : <CheckIcon />}
-                    <span>{intl.formatMessage(globalMessages.approve)}</span>
-                  </Button>
+                  {requestData.conflicts?.length ? (
+                    <Button
+                      className="w-full"
+                      buttonType="primary"
+                      onClick={() => setShowConflictModal(true)}
+                      disabled={updatingType !== null}
+                    >
+                      <ScaleIcon />
+                      <span>{intl.formatMessage(messages.resolve)}</span>
+                    </Button>
+                  ) : (
+                    <Button
+                      className="w-full"
+                      buttonType="success"
+                      onClick={() => modifyRequest('approve')}
+                      disabled={updatingType !== null}
+                    >
+                      {updatingType === 'approve' ? <Spinner /> : <CheckIcon />}
+                      <span>{intl.formatMessage(globalMessages.approve)}</span>
+                    </Button>
+                  )}
                 </span>
                 <span className="w-full">
                   <Button

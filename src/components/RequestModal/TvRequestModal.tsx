@@ -49,6 +49,8 @@ const messages = defineMessages('components.RequestModal', {
   numberofepisodes: '# of Episodes',
   seasonnumber: 'Season {number}',
   errorediting: 'Something went wrong while editing the request.',
+  approvalrefused:
+    'Your changes were saved, but the request conflicts with other requests. Resolve the conflict to approve it.',
   requestedited: 'Request for <strong>{title}</strong> edited successfully!',
   requestApproved: 'Request for <strong>{title}</strong> approved!',
   requestRetried:
@@ -122,6 +124,7 @@ const TvRequestModal = ({
     }
 
     setIsUpdating(true);
+    let approvalRefused = false;
 
     try {
       if (selectedSeasons.length > 0) {
@@ -147,7 +150,14 @@ const TvRequestModal = ({
 
         // The PUT already resubmits a failed request
         if (alsoApproveRequest && !isFailed) {
-          await axios.post(`/api/v1/request/${editRequest.id}/approve`);
+          try {
+            await axios.post(`/api/v1/request/${editRequest.id}/approve`);
+          } catch (e) {
+            if (!axios.isAxiosError(e) || e.response?.status !== 409) {
+              throw e;
+            }
+            approvalRefused = true;
+          }
         }
       } else {
         await axios.delete(`/api/v1/request/${editRequest.id}`);
@@ -161,9 +171,11 @@ const TvRequestModal = ({
             ? intl.formatMessage(
                 isFailed
                   ? messages.requestRetried
-                  : alsoApproveRequest
-                    ? messages.requestApproved
-                    : messages.requestedited,
+                  : approvalRefused
+                    ? messages.approvalrefused
+                    : alsoApproveRequest
+                      ? messages.requestApproved
+                      : messages.requestedited,
                 {
                   title: data?.name,
                   strong: (msg: React.ReactNode) => <strong>{msg}</strong>,
@@ -175,7 +187,7 @@ const TvRequestModal = ({
               })}
         </span>,
         {
-          appearance: 'success',
+          appearance: approvalRefused ? 'warning' : 'success',
           autoDismiss: true,
         }
       );

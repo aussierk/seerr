@@ -35,6 +35,8 @@ const messages = defineMessages('components.RequestModal', {
   resubmit: 'Resubmit Request',
   requestfrom: "{username}'s request is pending approval.",
   errorediting: 'Something went wrong while editing the request.',
+  approvalrefused:
+    'Your changes were saved, but the request conflicts with other requests. Resolve the conflict to approve it.',
   requestedited: 'Request for <strong>{title}</strong> edited successfully!',
   requestApproved: 'Request for <strong>{title}</strong> approved!',
   requestRetried:
@@ -182,6 +184,7 @@ const MovieRequestModal = ({
 
   const updateRequest = async (alsoApproveRequest = false) => {
     setIsUpdating(true);
+    let approvalRefused = false;
 
     try {
       await axios.put(`/api/v1/request/${editRequest?.id}`, {
@@ -195,7 +198,14 @@ const MovieRequestModal = ({
 
       // The PUT already resubmits a failed request
       if (alsoApproveRequest && !isFailed) {
-        await axios.post(`/api/v1/request/${editRequest?.id}/approve`);
+        try {
+          await axios.post(`/api/v1/request/${editRequest?.id}/approve`);
+        } catch (e) {
+          if (!axios.isAxiosError(e) || e.response?.status !== 409) {
+            throw e;
+          }
+          approvalRefused = true;
+        }
       }
       mutate('/api/v1/request?filter=all&take=10&sort=modified&skip=0');
       mutate('/api/v1/request/count');
@@ -205,9 +215,11 @@ const MovieRequestModal = ({
           {intl.formatMessage(
             isFailed
               ? messages.requestRetried
-              : alsoApproveRequest
-                ? messages.requestApproved
-                : messages.requestedited,
+              : approvalRefused
+                ? messages.approvalrefused
+                : alsoApproveRequest
+                  ? messages.requestApproved
+                  : messages.requestedited,
             {
               title: data?.title,
               strong: (msg: React.ReactNode) => <strong>{msg}</strong>,
@@ -215,7 +227,7 @@ const MovieRequestModal = ({
           )}
         </span>,
         {
-          appearance: 'success',
+          appearance: approvalRefused ? 'warning' : 'success',
           autoDismiss: true,
         }
       );
