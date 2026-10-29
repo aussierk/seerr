@@ -1,3 +1,5 @@
+import type { ServerDefaults } from '@server/api/servarr/base';
+import { getSettingsChange } from '@server/api/servarr/base';
 import type { RadarrMovieOptions } from '@server/api/servarr/radarr';
 import RadarrAPI from '@server/api/servarr/radarr';
 import type {
@@ -18,9 +20,12 @@ import { MediaRequest } from '@server/entity/MediaRequest';
 import Season from '@server/entity/Season';
 import SeasonRequest from '@server/entity/SeasonRequest';
 import notificationManager, { Notification } from '@server/lib/notifications';
+import { Permission } from '@server/lib/permissions';
+import { resolveServiceDefaults } from '@server/lib/serviceDefaults';
 import {
   getSettings,
   type DVRSettings,
+  type RadarrSettings,
   type SonarrSettings,
 } from '@server/lib/settings';
 import logger from '@server/logger';
@@ -140,42 +145,108 @@ export class MediaRequestSubscriber implements EntitySubscriberInterface<MediaRe
     }
   }
 
+  // Can re-download or move files, so it needs the admin's opt-in and a manager's approval
+  private mayUpdateSettings(entity: MediaRequest): boolean {
+    return (
+      getSettings().main.updateExistingItems &&
+      !!entity.modifiedBy?.hasPermission(Permission.MANAGE_REQUESTS)
+    );
+  }
+
+  private serverDefaults(
+    entity: MediaRequest,
+    server: DVRSettings
+  ): ServerDefaults {
+    const defaults = [false, true].map((isAnime) =>
+      resolveServiceDefaults(
+        entity.type,
+        server as RadarrSettings | SonarrSettings,
+        isAnime
+      )
+    );
+
+    return {
+      rootFolders: defaults.flatMap(({ rootFolder }) => rootFolder ?? []),
+      profileIds: defaults.flatMap(({ profileId }) => profileId ?? []),
+      languageProfileIds: defaults.flatMap(
+        ({ languageProfileId }) => languageProfileId ?? []
+      ),
+    };
+  }
+
   private async syncExistingItem(
     entity: MediaRequest,
     api: RadarrAPI | SonarrAPI,
     server: DVRSettings,
     itemId: number,
-    { tags, existing }: { tags: number[]; existing?: SonarrSeries }
+    {
+      tags,
+      existing,
+    }: {
+      tags?: number[];
+      existing?: SonarrSeries;
+    } = {}
   ): Promise<void> {
+    if (tags) {
+      await this.bestEffort(
+        entity,
+        'apply tags to the existing item',
+        async () => {
+          const merged = [...tags];
+          if (server.tagRequests) {
+            // a failed lookup still applies the configured tags
+            await this.bestEffort(
+              entity,
+              'resolve the requester tag',
+              async () => {
+                const userTagId = await this.getOrCreateUserTag(
+                  api,
+                  `${server.hostname}:${server.port}`,
+                  entity
+                );
+                if (userTagId && !merged.includes(userTagId)) {
+                  merged.push(userTagId);
+                }
+              }
+            );
+          }
+          if (merged.length === 0) {
+            return;
+          }
+          if (api instanceof SonarrAPI) {
+            await api.addTags(itemId, merged, existing);
+          } else {
+            await api.addTags(itemId, merged);
+          }
+        }
+      );
+    }
+
+    if (!this.mayUpdateSettings(entity)) {
+      return;
+    }
+
+    // The fetch sits inside bestEffort too: a failed read must log and continue,
+    // not reach the caller's catch and mark the request FAILED.
     await this.bestEffort(
       entity,
-      'apply tags to the existing item',
+      'update settings of the existing item',
       async () => {
-        const merged = [...tags];
-        if (server.tagRequests) {
-          // a failed lookup still applies the configured tags
-          await this.bestEffort(
-            entity,
-            'resolve the requester tag',
-            async () => {
-              const userTagId = await this.getOrCreateUserTag(
-                api,
-                `${server.hostname}:${server.port}`,
-                entity
-              );
-              if (userTagId && !merged.includes(userTagId)) {
-                merged.push(userTagId);
-              }
-            }
-          );
-        }
-        if (merged.length === 0) {
-          return;
-        }
+        const item =
+          existing ??
+          (await (api instanceof SonarrAPI
+            ? api.getSeriesById(itemId)
+            : api.getMovie({ id: itemId })));
+        const change = getSettingsChange(
+          item,
+          entity,
+          this.serverDefaults(entity, server)
+        );
+
         if (api instanceof SonarrAPI) {
-          await api.addTags(itemId, merged, existing);
+          await api.updateSeriesSettings(itemId, change);
         } else {
-          await api.addTags(itemId, merged);
+          await api.updateMovieSettings(itemId, change);
         }
       }
     );
@@ -587,6 +658,17 @@ export class MediaRequestSubscriber implements EntitySubscriberInterface<MediaRe
           searchNow: !radarrSettings.preventSearch,
         };
 
+        const itemId = this.existingItemId(entity, media, radarrSettings);
+        if (itemId) {
+          await this.syncExistingItem(
+            entity,
+            radarr,
+            radarrSettings,
+            itemId,
+            {}
+          );
+        }
+
         // Run entity asynchronously so we don't wait for it on the UI side
         radarr
           .addMovie(radarrMovieOptions)
@@ -845,11 +927,7 @@ export class MediaRequestSubscriber implements EntitySubscriberInterface<MediaRe
           isAnime && sonarrSettings.activeAnimeLanguageProfileId
             ? sonarrSettings.activeAnimeLanguageProfileId
             : sonarrSettings.activeLanguageProfileId;
-        const tags = this.getSonarrTags(
-          entity,
-          sonarrSettings,
-          isAnime
-        );
+        const tags = this.getSonarrTags(entity, sonarrSettings, isAnime);
 
         if (
           entity.rootFolder &&
@@ -916,6 +994,17 @@ export class MediaRequestSubscriber implements EntitySubscriberInterface<MediaRe
           monitorNewItems: sonarrSettings.monitorNewItems,
           searchNow: !sonarrSettings.preventSearch,
         };
+
+        const itemId = this.existingItemId(entity, media, sonarrSettings);
+        if (itemId) {
+          await this.syncExistingItem(
+            entity,
+            sonarr,
+            sonarrSettings,
+            itemId,
+            {}
+          );
+        }
 
         // Run entity asynchronously so we don't wait for it on the UI side
         sonarr

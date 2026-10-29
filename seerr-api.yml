@@ -271,6 +271,10 @@ components:
         enableSpecialEpisodes:
           type: boolean
           example: false
+        updateExistingItems:
+          type: boolean
+          description: Let an approved request change the quality profile, language profile and root folder of a title that is already in Radarr or Sonarr. Changing the root folder moves its files.
+          example: false
         versionCheck:
           type: boolean
           example: false
@@ -1253,6 +1257,45 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/WatchProviders'
+    RequestConflict:
+      type: object
+      properties:
+        request:
+          type: object
+          properties:
+            id:
+              type: number
+              example: 124
+            status:
+              type: number
+              example: 1
+            serverId:
+              type: number
+            profileId:
+              type: number
+            rootFolder:
+              type: string
+            languageProfileId:
+              type: number
+            requestedBy:
+              type: object
+              properties:
+                id:
+                  type: number
+                  example: 2
+                displayName:
+                  type: string
+                  example: jdoe
+        differences:
+          type: array
+          items:
+            type: string
+            example: quality profile 4 vs 5
+        seasons:
+          type: array
+          description: Series only. The seasons both requests hold.
+          items:
+            type: number
     MediaRequest:
       type: object
       properties:
@@ -1295,6 +1338,12 @@ components:
           type: boolean
           example: false
           description: If true, this request will not count against the user's quota. Requires MANAGE_REQUESTS permission.
+        conflicts:
+          type: array
+          readOnly: true
+          description: Pending requests only, and only for users with the MANAGE_REQUESTS permission. Other users' requests for the same media on the same server whose settings differ, so both cannot be satisfied. Also included on each request in `mediaInfo.requests` of the movie and TV details endpoints.
+          items:
+            $ref: '#/components/schemas/RequestConflict'
       required:
         - id
         - status
@@ -6792,6 +6841,34 @@ paths:
                 $ref: '#/components/schemas/MediaRequest'
         '409':
           description: Only failed requests can be retried
+  /request/{requestId}/resolve:
+    post:
+      summary: Resolve a request's conflicts
+      description: |
+        Approves a pending request and gives the other pending requests it conflicts with its quality profile, root folder and language profile. They stay pending. Requests that are already approved or completed keep the settings they were sent with. Also returns the approved request in a JSON object.
+
+        Requires the `MANAGE_REQUESTS` permission or `ADMIN`.
+      tags:
+        - request
+      parameters:
+        - in: path
+          name: requestId
+          description: Request ID
+          required: true
+          schema:
+            type: string
+            example: '1'
+      responses:
+        '200':
+          description: Conflicts resolved and the request approved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MediaRequest'
+        '404':
+          description: Request not found
+        '409':
+          description: Only pending requests can be resolved, or the request has no conflicts
   /request/{requestId}/{status}:
     post:
       summary: Update a request's status
@@ -6826,7 +6903,7 @@ paths:
         '400':
           description: Status must be approve or decline
         '409':
-          description: Only pending requests can be approved or declined
+          description: Only pending requests can be approved or declined, or the request conflicts with other requests and must be resolved with `POST /request/{requestId}/resolve` instead
   /movie/{movieId}:
     get:
       summary: Get movie details

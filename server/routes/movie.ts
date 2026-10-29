@@ -6,6 +6,8 @@ import { MediaType } from '@server/constants/media';
 import { getRepository } from '@server/datasource';
 import Media from '@server/entity/Media';
 import { Watchlist } from '@server/entity/Watchlist';
+import { Permission } from '@server/lib/permissions';
+import { attachConflicts } from '@server/lib/requestConflicts';
 import logger from '@server/logger';
 import { mapMovieDetails } from '@server/models/Movie';
 import { mapMovieResult } from '@server/models/Search';
@@ -34,11 +36,16 @@ movieRoutes.get('/:id', async (req, res, next) => {
       },
     });
 
-    const data = mapMovieDetails(
-      tmdbMovie,
-      media?.filter(req.user),
-      onUserWatchlist
-    );
+    const filteredMedia = media?.filter(req.user);
+
+    if (filteredMedia && req.user?.hasPermission(Permission.MANAGE_REQUESTS)) {
+      filteredMedia.requests = await attachConflicts(
+        filteredMedia,
+        filteredMedia.requests
+      );
+    }
+
+    const data = mapMovieDetails(tmdbMovie, filteredMedia, onUserWatchlist);
 
     // TMDB issue where it doesnt fallback to English when no overview is available in requested locale.
     if (!data.overview) {

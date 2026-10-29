@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
-import { afterEach, describe, it, mock } from 'node:test';
+import { afterEach, beforeEach, describe, it, mock } from 'node:test';
 
 import RadarrAPI from '@server/api/servarr/radarr';
+import type { SonarrSeries } from '@server/api/servarr/sonarr';
 import SonarrAPI from '@server/api/servarr/sonarr';
 import TheMovieDb from '@server/api/themoviedb';
 import {
@@ -12,6 +13,7 @@ import {
 import Media from '@server/entity/Media';
 import { MediaRequest } from '@server/entity/MediaRequest';
 import { User } from '@server/entity/User';
+import { Permission } from '@server/lib/permissions';
 import type {
   DVRSettings,
   RadarrSettings,
@@ -24,10 +26,13 @@ import type { EntityManager } from 'typeorm';
 interface SubscriberWithPrivate {
   syncExistingItem: (
     entity: MediaRequest,
-    api: RadarrAPI,
+    api: RadarrAPI | SonarrAPI,
     server: DVRSettings,
     itemId: number,
-    options: { tags: number[] }
+    options: {
+      tags?: number[];
+      existing?: SonarrSeries;
+    }
   ) => Promise<void>;
   existingItemId: (
     entity: MediaRequest,
@@ -648,5 +653,398 @@ describe('MediaRequestSubscriber existingItemId', () => {
       ),
       undefined
     );
+  });
+});
+
+describe('MediaRequestSubscriber syncExistingItem settings', () => {
+  // Updating an existing item is opt-in and needs a manager's approval
+  beforeEach(() => {
+    getSettings().main.updateExistingItems = true;
+  });
+  afterEach(() => {
+    getSettings().main.updateExistingItems = false;
+    mock.restoreAll();
+  });
+
+  const manager = new User({ id: 2, permissions: Permission.MANAGE_REQUESTS });
+
+  const sync = (
+    entity: MediaRequest,
+    api: RadarrAPI | SonarrAPI,
+    existing?: SonarrSeries,
+    options: {
+      approver?: User | null;
+      server?: Partial<DVRSettings>;
+    } = {}
+  ) => {
+    entity.modifiedBy =
+      options.approver === undefined
+        ? manager
+        : (options.approver ?? undefined);
+
+    return (
+      new MediaRequestSubscriber() as unknown as SubscriberWithPrivate
+    ).syncExistingItem(
+      entity,
+      api,
+      tagSettings({ id: 0, ...options.server }),
+      42,
+      { existing }
+    );
+  };
+
+  const movieAt =
+    (path: string, qualityProfileId = 1) =>
+    async () =>
+      ({ id: 42, path, qualityProfileId }) as never;
+
+  it('updates only what the request sets and the movie lacks', async () => {
+    const api = buildApi();
+    mock.method(api, 'getMovie', movieAt('/movies/Test (2020)'));
+    const update = mock.method(api, 'updateMovieSettings', async () => {});
+    const entity = buildEntity(buildMedia());
+    entity.profileId = 4;
+    entity.rootFolder = '/other';
+
+    await sync(entity, api);
+
+    assert.deepStrictEqual(update.mock.calls[0].arguments, [
+      42,
+      { qualityProfileId: 4, rootFolderPath: '/other' },
+    ]);
+  });
+
+  it('leaves the root folder alone when the movie is already in it', async () => {
+    const api = buildApi();
+    mock.method(api, 'getMovie', movieAt('D:\\Movies\\Test (2020)'));
+    const update = mock.method(api, 'updateMovieSettings', async () => {});
+    const entity = buildEntity(buildMedia());
+    entity.profileId = 4;
+    entity.rootFolder = 'D:/Movies/';
+
+    await sync(entity, api);
+
+    assert.deepStrictEqual(update.mock.calls[0].arguments, [
+      42,
+      { qualityProfileId: 4 },
+    ]);
+  });
+
+  it('asks for no change when the request takes the server defaults', async () => {
+    const api = buildApi();
+    mock.method(api, 'getMovie', movieAt('/movies/Test (2020)', 7));
+    const update = mock.method(api, 'updateMovieSettings', async () => {});
+
+    await sync(buildEntity(buildMedia()), api);
+
+    assert.deepStrictEqual(update.mock.calls[0].arguments, [42, {}]);
+  });
+
+  it('asks for no change when the movie already matches the request', async () => {
+    const api = buildApi();
+    mock.method(api, 'getMovie', movieAt('/movies/Test (2020)', 4));
+    const update = mock.method(api, 'updateMovieSettings', async () => {});
+    const entity = buildEntity(buildMedia());
+    entity.profileId = 4;
+    entity.rootFolder = '/movies';
+
+    await sync(entity, api);
+
+    assert.deepStrictEqual(update.mock.calls[0].arguments, [42, {}]);
+  });
+
+  describe('guards', () => {
+    const request = () => {
+      const entity = buildEntity(buildMedia());
+      entity.profileId = 4;
+      entity.rootFolder = '/other';
+      return entity;
+    };
+
+    const stubbedApi = () => {
+      const api = buildApi();
+      const get = mock.method(api, 'getMovie', movieAt('/movies/Test (2020)'));
+      const update = mock.method(api, 'updateMovieSettings', async () => {});
+      return { api, get, update };
+    };
+
+    it('does nothing while the admin has not allowed updates', async () => {
+      getSettings().main.updateExistingItems = false;
+      const { api, get, update } = stubbedApi();
+
+      await sync(request(), api);
+
+      assert.strictEqual(get.mock.callCount(), 0);
+      assert.strictEqual(update.mock.callCount(), 0);
+    });
+
+    it('does nothing when the approver is not a manager', async () => {
+      const { api, update } = stubbedApi();
+      const approver = new User({
+        id: 3,
+        permissions: Permission.REQUEST | Permission.AUTO_APPROVE,
+      });
+
+      await sync(request(), api, undefined, { approver });
+
+      assert.strictEqual(update.mock.callCount(), 0);
+    });
+
+    it('does nothing when nobody approved the request', async () => {
+      const { api, update } = stubbedApi();
+
+      await sync(request(), api, undefined, { approver: null });
+
+      assert.strictEqual(update.mock.callCount(), 0);
+    });
+
+    it('treats values equal to the server defaults as not chosen', async () => {
+      const { api, update } = stubbedApi();
+      const entity = buildEntity(buildMedia());
+      entity.profileId = 7;
+      entity.rootFolder = '/default/';
+
+      await sync(entity, api, undefined, {
+        server: { activeDirectory: '/default', activeProfileId: 7 },
+      });
+
+      assert.deepStrictEqual(update.mock.calls[0].arguments, [42, {}]);
+    });
+
+    it('still applies a value that is not a server default', async () => {
+      const { api, update } = stubbedApi();
+
+      await sync(request(), api, undefined, {
+        server: { activeDirectory: '/default', activeProfileId: 7 },
+      });
+
+      assert.deepStrictEqual(update.mock.calls[0].arguments, [
+        42,
+        { qualityProfileId: 4, rootFolderPath: '/other' },
+      ]);
+    });
+
+    it('treats the anime defaults of a series as not chosen', async () => {
+      const api = new SonarrAPI({
+        url: 'http://localhost:8989/api/v3',
+        apiKey: 'test',
+      });
+      const update = mock.method(api, 'updateSeriesSettings', async () => {});
+      const entity = buildEntity(buildMedia({ mediaType: MediaType.TV }));
+      entity.type = MediaType.TV;
+      entity.profileId = 8;
+      entity.rootFolder = '/anime';
+
+      await sync(
+        entity,
+        api,
+        { id: 42, path: '/other/Show', qualityProfileId: 1 } as SonarrSeries,
+        {
+          server: {
+            activeDirectory: '/tv',
+            activeProfileId: 4,
+            activeAnimeDirectory: '/anime',
+            activeAnimeProfileId: 8,
+          } as Partial<DVRSettings>,
+        }
+      );
+
+      assert.deepStrictEqual(update.mock.calls[0].arguments, [42, {}]);
+    });
+  });
+
+  it('swallows update failures so the request is not blocked', async () => {
+    const api = buildApi();
+    mock.method(api, 'getMovie', movieAt('/movies/Test (2020)'));
+    mock.method(api, 'updateMovieSettings', async () => {
+      throw new Error('connection refused');
+    });
+    const entity = buildEntity(buildMedia());
+    entity.profileId = 4;
+
+    await assert.doesNotReject(() => sync(entity, api));
+  });
+
+  it('swallows a failed read of the item so the request is not blocked', async () => {
+    const api = buildApi();
+    mock.method(api, 'getMovie', async () => {
+      throw new Error('connection refused');
+    });
+    const update = mock.method(api, 'updateMovieSettings', async () => {});
+    const entity = buildEntity(buildMedia());
+    entity.profileId = 4;
+
+    await assert.doesNotReject(() => sync(entity, api));
+    assert.strictEqual(update.mock.callCount(), 0);
+  });
+
+  it('updates the language profile of a series without looking it up again', async () => {
+    const api = new SonarrAPI({
+      url: 'http://localhost:8989/api/v3',
+      apiKey: 'test',
+    });
+    const get = mock.method(api, 'getSeriesById', async () => {
+      throw new Error('unexpected lookup');
+    });
+    const update = mock.method(api, 'updateSeriesSettings', async () => {});
+    const entity = buildEntity(buildMedia({ mediaType: MediaType.TV }));
+    entity.languageProfileId = 3;
+
+    await sync(entity, api, {
+      id: 42,
+      path: '/tv/Show',
+      qualityProfileId: 1,
+      languageProfileId: 1,
+    } as SonarrSeries);
+
+    assert.strictEqual(get.mock.callCount(), 0);
+    assert.deepStrictEqual(update.mock.calls[0].arguments, [
+      42,
+      { languageProfileId: 3 },
+    ]);
+  });
+
+  it('is applied when approved media is already available', async () => {
+    configureRadarr({ tags: [], tagRequests: false });
+    const media = buildMedia();
+    const entity = buildEntity(media);
+    entity.profileId = 4;
+    mock.method(RadarrAPI.prototype, 'addTags', async () => undefined);
+    const sync = mock.method(
+      MediaRequestSubscriber.prototype as unknown as SubscriberWithPrivate,
+      'syncExistingItem',
+      async () => {}
+    );
+
+    await new MediaRequestSubscriber().sendToRadarr(
+      entity,
+      buildManager(media)
+    );
+
+    assert.strictEqual(entity.status, MediaRequestStatus.COMPLETED);
+    assert.strictEqual(sync.mock.callCount(), 1);
+  });
+
+  it('completes when the item cannot be read from an unreachable Radarr', async () => {
+    configureRadarr({ tags: [], tagRequests: false, port: 1 });
+    const media = buildMedia();
+    const entity = buildEntity(media);
+    entity.profileId = 4;
+    mock.method(RadarrAPI.prototype, 'addTags', async () => undefined);
+
+    await new MediaRequestSubscriber().sendToRadarr(
+      entity,
+      buildManager(media)
+    );
+
+    assert.strictEqual(entity.status, MediaRequestStatus.COMPLETED);
+  });
+});
+
+// The whole flow for a title that is already in Radarr: what really reaches it
+describe('MediaRequestSubscriber sendToRadarr updating an existing movie', () => {
+  const stubMovie = () =>
+    Object.defineProperty(RadarrAPI.prototype, 'getMovie', {
+      get() {
+        return async () =>
+          ({
+            id: 42,
+            path: '/elsewhere/Test (2020)',
+            qualityProfileId: 7,
+          }) as never;
+      },
+      set() {},
+      configurable: true,
+    });
+
+  const approvedBy = (media: Media, approver?: User): MediaRequest => {
+    const entity = buildEntity(media);
+    entity.modifiedBy = approver;
+    return entity;
+  };
+
+  const manager = new User({ id: 2, permissions: Permission.MANAGE_REQUESTS });
+  const autoApprover = new User({
+    id: 1,
+    permissions: Permission.REQUEST | Permission.AUTO_APPROVE,
+  });
+
+  beforeEach(() => {
+    configureRadarr({
+      tags: [],
+      tagRequests: false,
+      activeDirectory: '/movies',
+      activeProfileId: 1,
+    });
+    stubMovie();
+    mock.method(RadarrAPI.prototype, 'addTags', async () => undefined);
+    getSettings().main.updateExistingItems = true;
+  });
+  afterEach(() => {
+    delete (RadarrAPI.prototype as unknown as Record<string, unknown>).getMovie;
+    getSettings().main.updateExistingItems = false;
+    mock.restoreAll();
+  });
+
+  const send = async (entity: MediaRequest, media: Media) => {
+    const update = mock.method(
+      RadarrAPI.prototype,
+      'updateMovieSettings',
+      async () => {}
+    );
+    await new MediaRequestSubscriber().sendToRadarr(
+      entity,
+      buildManager(media)
+    );
+    assert.strictEqual(entity.status, MediaRequestStatus.COMPLETED);
+    return update;
+  };
+
+  it('moves nothing while the admin has not allowed updates', async () => {
+    getSettings().main.updateExistingItems = false;
+    const media = buildMedia();
+    const entity = approvedBy(media, manager);
+    entity.profileId = 4;
+    entity.rootFolder = '/other';
+
+    const update = await send(entity, media);
+
+    assert.strictEqual(update.mock.callCount(), 0);
+  });
+
+  it('moves nothing for a request that was auto-approved', async () => {
+    const media = buildMedia();
+    const entity = approvedBy(media, autoApprover);
+    entity.profileId = 4;
+    entity.rootFolder = '/other';
+
+    const update = await send(entity, media);
+
+    assert.strictEqual(update.mock.callCount(), 0);
+  });
+
+  it('moves nothing for the folder and profile an untouched form pre-fills', async () => {
+    const media = buildMedia();
+    const entity = approvedBy(media, manager);
+    entity.profileId = 1;
+    entity.rootFolder = '/movies';
+
+    const update = await send(entity, media);
+
+    assert.deepStrictEqual(update.mock.calls[0].arguments, [42, {}]);
+  });
+
+  it('applies the folder and profile a manager approved', async () => {
+    const media = buildMedia();
+    const entity = approvedBy(media, manager);
+    entity.profileId = 4;
+    entity.rootFolder = '/other';
+
+    const update = await send(entity, media);
+
+    assert.deepStrictEqual(update.mock.calls[0].arguments, [
+      42,
+      { qualityProfileId: 4, rootFolderPath: '/other' },
+    ]);
   });
 });

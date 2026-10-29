@@ -7,6 +7,8 @@ import { MediaType } from '@server/constants/media';
 import { getRepository } from '@server/datasource';
 import Media from '@server/entity/Media';
 import { Watchlist } from '@server/entity/Watchlist';
+import { Permission } from '@server/lib/permissions';
+import { attachConflicts } from '@server/lib/requestConflicts';
 import logger from '@server/logger';
 import { mapTvResult } from '@server/models/Search';
 import { mapSeasonWithEpisodes, mapTvDetails } from '@server/models/Tv';
@@ -21,9 +23,10 @@ tvRoutes.get('/:id', async (req, res, next) => {
     const tmdbTv = await tmdb.getTvShow({
       tvId: Number(req.params.id),
     });
-    const metadataProvider = tmdbTv.keywords.results.some(
+    const isAnime = tmdbTv.keywords.results.some(
       (keyword: TmdbKeyword) => keyword.id === ANIME_KEYWORD_ID
-    )
+    );
+    const metadataProvider = isAnime
       ? await getMetadataProvider('anime')
       : await getMetadataProvider('tv');
     const tv = await metadataProvider.getTvShow({
@@ -42,7 +45,17 @@ tvRoutes.get('/:id', async (req, res, next) => {
       },
     });
 
-    const data = mapTvDetails(tv, media?.filter(req.user), onUserWatchlist);
+    const filteredMedia = media?.filter(req.user);
+
+    if (filteredMedia && req.user?.hasPermission(Permission.MANAGE_REQUESTS)) {
+      filteredMedia.requests = await attachConflicts(
+        filteredMedia,
+        filteredMedia.requests,
+        { isAnime }
+      );
+    }
+
+    const data = mapTvDetails(tv, filteredMedia, onUserWatchlist);
 
     // TMDB issue where it doesnt fallback to English when no overview is available in requested locale.
     if (!data.overview) {

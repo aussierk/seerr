@@ -5,7 +5,7 @@ import {
   MediaStatus,
   MediaType,
 } from '@server/constants/media';
-import { getRepository } from '@server/datasource';
+import dataSource, { getRepository } from '@server/datasource';
 import Media from '@server/entity/Media';
 import {
   BlocklistedMediaError,
@@ -23,6 +23,7 @@ import type {
 } from '@server/interfaces/api/requestInterfaces';
 import { hasOwnMovieRequest } from '@server/lib/ownMovieRequest';
 import { Permission } from '@server/lib/permissions';
+import { getConflictsFor } from '@server/lib/requestConflicts';
 import { getOwnBlockedSeasons } from '@server/lib/requestSeasons';
 import { getSettings } from '@server/lib/settings';
 import logger from '@server/logger';
@@ -34,6 +35,7 @@ import requestLock, {
   userKey,
 } from '@server/utils/requestLock';
 import { Router } from 'express';
+import { In } from 'typeorm';
 
 const requestRoutes = Router();
 
@@ -291,6 +293,15 @@ requestRoutes.get<Record<string, unknown>, RequestResultsResponse>(
         });
       }
 
+      if (req.user?.hasPermission(Permission.MANAGE_REQUESTS)) {
+        const conflicts = await getConflictsFor(requests);
+
+        mappedRequests = mappedRequests.map((r) => ({
+          ...r,
+          conflicts: conflicts.get(r.id) ?? [],
+        }));
+      }
+
       return res.status(200).json({
         pageInfo: {
           pages: Math.ceil(requestCount / pageSize),
@@ -468,6 +479,15 @@ requestRoutes.get('/:requestId', async (req, res, next) => {
       return next({
         status: 403,
         message: 'You do not have permission to view this request.',
+      });
+    }
+
+    if (req.user?.hasPermission(Permission.MANAGE_REQUESTS)) {
+      const conflicts = await getConflictsFor([request]);
+
+      return res.status(200).json({
+        ...request,
+        conflicts: conflicts.get(request.id) ?? [],
       });
     }
 
@@ -862,6 +882,100 @@ requestRoutes.post<{
 
 requestRoutes.post<{
   requestId: string;
+}>(
+  '/:requestId/resolve',
+  isAuthenticated(Permission.MANAGE_REQUESTS),
+  async (req, res, next) => {
+    const requestRepository = getRepository(MediaRequest);
+    const requestId = Number(req.params.requestId);
+
+    try {
+      return await requestLock.dispatch(requestKey(requestId), async () => {
+        const request = await requestRepository.findOneOrFail({
+          where: { id: requestId },
+          relations: { requestedBy: true, modifiedBy: true },
+        });
+
+        if (request.status !== MediaRequestStatus.PENDING) {
+          return next({
+            status: 409,
+            message: 'Only pending requests can be resolved.',
+          });
+        }
+
+        return mediaLock.dispatch(
+          mediaKey(request.type, request.media.tmdbId),
+          async () => {
+            // Another resolve may have rewritten this request while it waited
+            // for the lock, and saving the copy loaded before would undo that
+            const request = await requestRepository.findOneOrFail({
+              where: { id: requestId },
+              relations: { requestedBy: true, modifiedBy: true },
+            });
+
+            if (request.status !== MediaRequestStatus.PENDING) {
+              return next({
+                status: 409,
+                message: 'Only pending requests can be resolved.',
+              });
+            }
+
+            const conflicts = (await getConflictsFor([request])).get(
+              request.id
+            );
+
+            if (!conflicts?.length) {
+              return next({
+                status: 409,
+                message: 'This request has no conflicts to resolve.',
+              });
+            }
+
+            // Other pending and failed requests take this request's settings, so a failed
+            // one retries with the winner. Ones already sent on keep theirs.
+            const rewriteIds = conflicts
+              .filter(({ request: other }) =>
+                [
+                  MediaRequestStatus.PENDING,
+                  MediaRequestStatus.FAILED,
+                ].includes(other.status)
+              )
+              .map(({ request: other }) => other.id);
+            const others = rewriteIds.length
+              ? await requestRepository.find({ where: { id: In(rewriteIds) } })
+              : [];
+
+            await dataSource.transaction(async (manager) => {
+              const repository = manager.getRepository(MediaRequest);
+
+              for (const other of others) {
+                other.profileId = request.profileId;
+                other.rootFolder = request.rootFolder;
+                other.languageProfileId = request.languageProfileId;
+                await repository.save(other);
+              }
+
+              request.status = MediaRequestStatus.APPROVED;
+              request.modifiedBy = req.user;
+              await repository.save(request);
+            });
+
+            return res.status(200).json(request);
+          }
+        );
+      });
+    } catch (e) {
+      logger.error('Error resolving request conflicts', {
+        label: 'Media Request',
+        message: e.message,
+      });
+      next({ status: 404, message: 'Request not found.' });
+    }
+  }
+);
+
+requestRoutes.post<{
+  requestId: string;
   status: 'approve' | 'decline';
 }>(
   '/:requestId/:status',
@@ -900,11 +1014,50 @@ requestRoutes.post<{
           });
         }
 
-        request.status = newStatus;
-        request.modifiedBy = req.user;
-        await requestRepository.save(request);
+        const update = async (target: MediaRequest) => {
+          target.status = newStatus;
+          target.modifiedBy = req.user;
+          await requestRepository.save(target);
 
-        return res.status(200).json(request);
+          return res.status(200).json(target);
+        };
+
+        if (newStatus !== MediaRequestStatus.APPROVED) {
+          return update(request);
+        }
+
+        // Conflicting requests are held for a manager, so approving one alone is
+        // refused.
+        return mediaLock.dispatch(
+          mediaKey(request.type, request.media.tmdbId),
+          async () => {
+            // A resolve may have rewritten this request while it waited for the
+            // lock, and saving the copy loaded before would undo that
+            const fresh = await requestRepository.findOneOrFail({
+              where: { id: requestId },
+              relations: { requestedBy: true, modifiedBy: true },
+            });
+
+            if (fresh.status !== MediaRequestStatus.PENDING) {
+              return next({
+                status: 409,
+                message: 'Only pending requests can be approved or declined.',
+              });
+            }
+
+            const conflicts = (await getConflictsFor([fresh])).get(fresh.id);
+
+            if (conflicts?.length) {
+              return next({
+                status: 409,
+                message:
+                  'This request conflicts with other requests. Resolve the conflict instead.',
+              });
+            }
+
+            return update(fresh);
+          }
+        );
       });
     } catch (e) {
       logger.error('Error processing request update', {
