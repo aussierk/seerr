@@ -8,7 +8,7 @@ import { MediaType } from '@server/constants/media';
 import { getRepository } from '@server/datasource';
 import OverrideRule from '@server/entity/OverrideRule';
 import type { User } from '@server/entity/User';
-import { getSettings } from '@server/lib/settings';
+import { resolveService, servicesFor } from '@server/lib/serviceDefaults';
 
 export type OverrideRulesResult = {
   rootFolder: string | null;
@@ -29,33 +29,21 @@ async function overrideRules({
   tmdbMedia: TmdbMovieDetails | TmdbTvDetails;
   requestUser: User;
   tags?: number[] | null;
-  serviceId?: number;
+  serviceId?: number | null;
 }): Promise<OverrideRulesResult> {
-  const settings = getSettings();
-
   let rootFolder: string | null = null;
   let profileId: number | null = null;
 
   const serviceIdField =
     mediaType === MediaType.MOVIE ? 'radarrServiceId' : 'sonarrServiceId';
-  if (serviceId === undefined) {
-    const defaultRadarrId = is4k
-      ? settings.radarr.find((r) => r.is4k && r.isDefault)?.id
-      : settings.radarr.find((r) => !r.is4k && r.isDefault)?.id;
-    const defaultSonarrId = is4k
-      ? settings.sonarr.find((s) => s.is4k && s.isDefault)?.id
-      : settings.sonarr.find((s) => !s.is4k && s.isDefault)?.id;
-    serviceId =
-      mediaType === MediaType.MOVIE ? defaultRadarrId : defaultSonarrId;
-  }
+  const { service } = resolveService(servicesFor(mediaType), is4k, serviceId);
 
   const overrideRuleRepository = getRepository(OverrideRule);
-  const rules =
-    serviceId === undefined
-      ? []
-      : await overrideRuleRepository.find({
-          where: { [serviceIdField]: serviceId },
-        });
+  const rules = service
+    ? await overrideRuleRepository.find({
+        where: { [serviceIdField]: service.id },
+      })
+    : [];
 
   const appliedOverrideRules = rules.filter((rule) => {
     const hasAnimeKeyword =

@@ -12,6 +12,7 @@ import type {
   MediaWatchDataResponse,
 } from '@server/interfaces/api/mediaInterfaces';
 import { Permission } from '@server/lib/permissions';
+import resolveRequestRoute from '@server/lib/resolveRequestRoute';
 import { getSettings } from '@server/lib/settings';
 import logger from '@server/logger';
 import { isAuthenticated } from '@server/middleware/auth';
@@ -214,33 +215,16 @@ mediaRoutes.delete(
       const is4k = String(req.query.is4k) === 'true';
       const isMovie = media.mediaType === MediaType.MOVIE;
 
-      let serviceSettings;
-      if (isMovie) {
-        serviceSettings = settings.radarr.find(
-          (radarr) => radarr.isDefault && radarr.is4k === is4k
-        );
-      } else {
-        serviceSettings = settings.sonarr.find(
-          (sonarr) => sonarr.isDefault && sonarr.is4k === is4k
-        );
-      }
-
       const specificServiceId = is4k ? media.serviceId4k : media.serviceId;
-      if (
-        specificServiceId &&
-        specificServiceId >= 0 &&
-        serviceSettings?.id !== specificServiceId
-      ) {
-        if (isMovie) {
-          serviceSettings = settings.radarr.find(
-            (radarr) => radarr.id === specificServiceId
-          );
-        } else {
-          serviceSettings = settings.sonarr.find(
-            (sonarr) => sonarr.id === specificServiceId
-          );
-        }
-      }
+      const targetServerId = resolveRequestRoute({
+        mediaType: media.mediaType,
+        is4k,
+        serverId: specificServiceId,
+      });
+
+      const serviceSettings = (
+        isMovie ? settings.radarr : settings.sonarr
+      ).find((server) => server.id === targetServerId);
 
       if (!serviceSettings) {
         const arrName = `${is4k ? '4K ' : ''}${isMovie ? 'Radarr' : 'Sonarr'}`;
