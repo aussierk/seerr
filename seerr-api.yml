@@ -7453,9 +7453,28 @@ paths:
           example: false
           schema:
             type: boolean
+        - in: query
+          name: force
+          description: Delete even when pending, approved or completed requests depend on the service instance
+          required: false
+          example: false
+          schema:
+            type: boolean
       responses:
         '204':
           description: Successfully removed media item
+        '409':
+          description: Pending, approved or completed requests depend on this service instance. Repeat the call with `force=true` to delete anyway
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  affectedRequests:
+                    type: number
+                    example: 2
   /media/{mediaId}/{status}:
     post:
       summary: Update media status

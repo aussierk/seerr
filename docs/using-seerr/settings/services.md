@@ -68,8 +68,12 @@ If the hostname or IP address you configured above is not accessible outside you
 
 #### Enable Scan (optional)
 
-Enable this setting if you would like to scan your Radarr/Sonarr server for existing media/request status. It is recommended that you enable this setting, so that users cannot submit requests for media which has already been requested or is already available.
+Enable this setting if you would like to scan your Radarr/Sonarr server for existing media/request status. It is recommended that you enable this setting, so that Seerr knows which media is already available and who has requested it.
 
 #### Enable Automatic Search (optional)
 
 Enable this setting to have Radarr/Sonarr to automatically search for media upon approval of a request.
+
+#### Tag Requests (optional)
+
+Enable this setting to add a tag with the requester's user ID and display name to the item in Radarr/Sonarr. If several users request the same title, each of their tags is added. See [Requests From Multiple Users](/using-seerr/multi-user-requests).
