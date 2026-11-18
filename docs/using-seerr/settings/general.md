@@ -84,3 +84,13 @@ This setting is **disabled** by default.
 When enabled, users will be able to submit requests for specific seasons of TV series. If disabled, users will only be able to submit requests for all unavailable seasons.
 
 This setting is **enabled** by default.
+
+## Update Existing Items
+
+When enabled, an approved request can change the quality profile, language profile and root folder of a title that is already in Radarr or Sonarr. This only happens when a user with the `Manage Requests` permission approved the request, and only for settings that differ from the server defaults, so a request cannot move an item back to a default folder.
+
+:::warning
+Changing the root folder of an item that is already in Radarr or Sonarr **moves its files**.
+:::
+
+This setting is **disabled** by default.
